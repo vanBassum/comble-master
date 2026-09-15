@@ -58,15 +58,20 @@ namespace BoardConfig
     //     landscape:  swap_xy,           no mirror   = T
     //     portrait:   no swap,  mirror_x            = T applied to the above
     //
-    // MIRROR_Y instead of MIRROR_X is the same picture turned 180°, so if this
-    // comes up upside down rather than mirrored, move the true from X to Y — do
-    // not add it to both, which lands back at a reflection.
+    // WHICH mirror is the 180° question, and it was got wrong once: MIRROR_X and
+    // MIRROR_Y both give an unmirrored portrait, differing by a half turn, and
+    // the first attempt picked X and came up upside down. Never set both — that
+    // lands back at a reflection.
     //
-    // The TOUCH dial below is separate and has to move WITH this one — see the
-    // derivation there.
+    // What settled it was the TOUCH dial below disagreeing by exactly 180°. That
+    // is the diagnostic worth keeping: a tap that is wrong on ONE axis is a
+    // reflection, and means the touch transform is wrong; a tap that is wrong on
+    // BOTH is a half turn, and — since touch is derived to match the display —
+    // means the touch transform is right and the DISPLAY took the wrong arm.
+    // Reading the error that way names the culprit without a second guess.
     static constexpr bool LCD_SWAP_XY  = false;
-    static constexpr bool LCD_MIRROR_X = true;
-    static constexpr bool LCD_MIRROR_Y = false;
+    static constexpr bool LCD_MIRROR_X = false;
+    static constexpr bool LCD_MIRROR_Y = true;
 
     // Logical resolution. No swap, so this is the native scan order.
     static constexpr int LCD_H_RES = 320;
@@ -131,24 +136,22 @@ namespace BoardConfig
     // so these are a separate dial from LCD_SWAP_XY above and are deliberately
     // NOT the same values.
     //
-    // DERIVED from the landscape pair, not measured, so this is the first thing
-    // to suspect if a tap lands wrong. The landscape values were verified on the
-    // Thermostat's hardware: display (swap, no mirror) against touch (swap,
-    // mirror_x). esp_lcd_touch swaps before it mirrors, so with W = 480 the
-    // landscape width, those two agreeing means
+    // Both mirrors on, no swap. The raw FT6336U frame relates to the panel's own
+    // frame as tx = 319 - px, ty = py — pinned by observation, not assumed: with
+    // these very values against a mirror_x display, every tap landed a half turn
+    // out, and only one raw relation does that.
     //
-    //     display:  (px, py) -> (py, px)
-    //     touch:    (tx, ty) -> (ty, tx) -> (W-1-ty, tx)
+    // Against the mirror_y display above, which puts panel pixel (px, py) on
+    // screen at (px, 479 - py), substituting that relation means the touch layer
+    // must report (319 - tx, 479 - ty) — both mirrors, which is what is here.
     //
-    // and equating them gives tx = px, ty = 479 - py. In other words the raw
-    // touch frame is the panel's own portrait frame with Y running backwards.
-    //
-    // The portrait display above is mirror_x, so it puts panel pixel (px, py) at
-    // screen (319 - px, py). Substituting the two relations, the touch layer has
-    // to report (319 - tx, 479 - ty) — which is no swap and BOTH mirrors on.
-    // Both, because the two trues are doing different jobs: mirror_x matches the
-    // display's own mirror, and mirror_y undoes the backwards raw Y that was
-    // there all along and that the landscape config was spending its mirror_x on.
+    // Note these do NOT follow from the landscape pair (display: swap, no mirror
+    // — touch: swap, mirror_x) by the obvious algebra; that route gives a
+    // different raw relation and a wrong answer, most likely over the order
+    // esp_lcd_touch composes swap and mirror in and with which extents. The
+    // measured relation above wins. If a tap ever lands wrong again, tap a known
+    // corner and read off WHICH axes are inverted — one axis blames this block,
+    // both axes blame the display arm above.
     static constexpr bool TOUCH_SWAP_XY  = false;
     static constexpr bool TOUCH_MIRROR_X = true;
     static constexpr bool TOUCH_MIRROR_Y = true;
