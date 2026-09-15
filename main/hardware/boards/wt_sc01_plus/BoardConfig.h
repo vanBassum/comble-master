@@ -34,24 +34,38 @@ namespace BoardConfig
     static constexpr int LCD_NATIVE_H_RES = 320;
     static constexpr int LCD_NATIVE_V_RES = 480;
 
-    // PORTRAIT orientation — the panel's own scan order, so all three dials are
-    // off. CONSUMED BY esp_lvgl_port, not by the panel driver: the port
-    // re-applies swap_xy/mirror on the panel itself and would clobber anything
-    // set behind its back, so rotation is owned in exactly one place. (The
-    // Thermostat learned that the expensive way — a manual swap_xy in the
+    // PORTRAIT orientation. CONSUMED BY esp_lvgl_port, not by the panel driver:
+    // the port re-applies swap_xy/mirror on the panel itself and would clobber
+    // anything set behind its back, so rotation is owned in exactly one place.
+    // (The Thermostat learned that the expensive way — a manual swap_xy in the
     // board's Display.h produced a sideways picture that no amount of fiddling
     // with the driver would fix.)
     //
-    // It was landscape (LCD_SWAP_XY = true, 480x320) until the UI was drawn to
-    // match the concept art, which is portrait: a column of adapter cards over a
+    // It was landscape (swap_xy alone, 480x320) until the UI was drawn to match
+    // the concept art, which is portrait: a column of adapter cards over a
     // full-width primary action. That layout is not a wide screen turned on its
     // side, it is a different one, so the panel turns instead of the design.
     //
-    // These three are the orientation dial: if the UI comes up sideways or upside
-    // down, flip one of them and nothing else. The TOUCH dial below is separate
-    // and has to move WITH this one — see the derivation there.
+    // MIRROR_X is not decoration, and turning all three off does NOT give
+    // portrait — it gives portrait held up to a mirror, which is exactly what
+    // the first attempt put on the glass. The reason is that swap_xy on its own
+    // is a TRANSPOSE, and a transpose is a reflection across the diagonal, not a
+    // rotation. So the working landscape picture was raw-panel-reflected, and
+    // dropping the transpose leaves the reflection rather than undoing it. A
+    // real quarter turn is transpose PLUS one mirror, so going from that
+    // landscape to portrait means swapping which of the two is on:
+    //
+    //     landscape:  swap_xy,           no mirror   = T
+    //     portrait:   no swap,  mirror_x            = T applied to the above
+    //
+    // MIRROR_Y instead of MIRROR_X is the same picture turned 180°, so if this
+    // comes up upside down rather than mirrored, move the true from X to Y — do
+    // not add it to both, which lands back at a reflection.
+    //
+    // The TOUCH dial below is separate and has to move WITH this one — see the
+    // derivation there.
     static constexpr bool LCD_SWAP_XY  = false;
-    static constexpr bool LCD_MIRROR_X = false;
+    static constexpr bool LCD_MIRROR_X = true;
     static constexpr bool LCD_MIRROR_Y = false;
 
     // Logical resolution. No swap, so this is the native scan order.
@@ -120,17 +134,22 @@ namespace BoardConfig
     // DERIVED from the landscape pair, not measured, so this is the first thing
     // to suspect if a tap lands wrong. The landscape values were verified on the
     // Thermostat's hardware: display (swap, no mirror) against touch (swap,
-    // mirror_x). esp_lcd_touch swaps before it mirrors, so with W the landscape
-    // width those two agreeing means
+    // mirror_x). esp_lcd_touch swaps before it mirrors, so with W = 480 the
+    // landscape width, those two agreeing means
     //
     //     display:  (px, py) -> (py, px)
     //     touch:    (tx, ty) -> (ty, tx) -> (W-1-ty, tx)
     //
-    // and equating them gives tx = px, ty = (W-1) - py. In other words the raw
+    // and equating them gives tx = px, ty = 479 - py. In other words the raw
     // touch frame is the panel's own portrait frame with Y running backwards.
-    // Portrait therefore wants no swap, no mirror_x, and mirror_y ON — which is
-    // the one non-obvious value here, and the one to flip first.
+    //
+    // The portrait display above is mirror_x, so it puts panel pixel (px, py) at
+    // screen (319 - px, py). Substituting the two relations, the touch layer has
+    // to report (319 - tx, 479 - ty) — which is no swap and BOTH mirrors on.
+    // Both, because the two trues are doing different jobs: mirror_x matches the
+    // display's own mirror, and mirror_y undoes the backwards raw Y that was
+    // there all along and that the landscape config was spending its mirror_x on.
     static constexpr bool TOUCH_SWAP_XY  = false;
-    static constexpr bool TOUCH_MIRROR_X = false;
+    static constexpr bool TOUCH_MIRROR_X = true;
     static constexpr bool TOUCH_MIRROR_Y = true;
 }
