@@ -5,15 +5,14 @@
 #include "RelayManager.h"
 #include "JsonHelpers.h"
 #include "SessionTable.h"
+#include "WebAssets.h"
 
 #include <unistd.h>
 #include <cstdio>
 #include <cstring>
 #include <esp_log.h>
-#include <esp_vfs_fat.h>
 
 static constexpr const char* TAG = "WebServerManager";
-static constexpr const char* BASE_PATH = "/www";
 static WebServerManager* s_instance_ = nullptr;
 
 WebServerManager::WebServerManager(StruxProvider& strux)
@@ -38,7 +37,8 @@ void WebServerManager::Init()
     auth_.Init();   // snapshot the stored password (after registration)
     wsHandler_.SetAuth(auth_);
 
-    MountFatPartition();
+    ReportWebAssets();
+
     StartServer();
     RegisterRoutes();
 
@@ -55,25 +55,32 @@ void WebServerManager::Init()
     ESP_LOGI(TAG, "Initialized");
 }
 
-void WebServerManager::MountFatPartition()
+// The UI now ships inside the app image rather than on a FAT partition, so there
+// is no mount to succeed or fail — and with it went the one boot line that used
+// to prove the frontend had actually made it onto the device. This replaces it:
+// it is what tells you the whole chain landed (pnpm -> packer -> linker), and the
+// bundle hash is how you tell two builds apart at a glance.
+//
+// A bad blob is reported, not fatal. A device whose UI failed to pack still has
+// its console, its commands and OTA — degraded is a far better failure than a
+// boot loop.
+void WebServerManager::ReportWebAssets()
 {
-    const esp_vfs_fat_mount_config_t mount_config = {
-        .format_if_mount_failed = true,
-        .max_files = 5,
-        .allocation_unit_size = CONFIG_WL_SECTOR_SIZE,
-        .disk_status_check_enable = false,
-        .use_one_fat = false,
-    };
-
-    static wl_handle_t wl_handle = WL_INVALID_HANDLE;
-    esp_err_t err = esp_vfs_fat_spiflash_mount_rw_wl(BASE_PATH, "www", &mount_config, &wl_handle);
-    if (err != ESP_OK)
+    const WebAssetTable& assets = WebAssets();
+    if (!assets.Valid())
     {
-        ESP_LOGE(TAG, "Failed to mount FAT partition: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "Web assets: unavailable — the UI will not be served");
         return;
     }
 
-    ESP_LOGI(TAG, "FAT partition mounted at %s", BASE_PATH);
+    const uint8_t* hash = assets.BundleHash();
+    ESP_LOGI(TAG, "Web assets: %lu file(s), %lu bytes, bundle %02x%02x%02x%02x%02x%02x%02x%02x",
+             (unsigned long)assets.Count(), (unsigned long)assets.StoredBytes(),
+             hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7]);
+
+    for (const WebFile& file : assets)
+        ESP_LOGD(TAG, "  %s (%lu bytes%s)", file.name,
+                 (unsigned long)file.size, file.gzipped ? ", gzip" : "");
 }
 
 void WebServerManager::StartServer()
@@ -116,7 +123,7 @@ void WebServerManager::RegisterRoutes()
     // app that bootstraps the page. No /api command route, no CORS: every
     // device interaction is a session on the one socket.
     wsHandler_.RegisterRoute(server_);
-    staticFileHandler_.RegisterRoute(server_, BASE_PATH);
+    staticFileHandler_.RegisterRoute(server_);
 }
 
 void WebServerManager::Broadcast(const char* json, int len)
@@ -148,15 +155,12 @@ RequestError WebServerManager::Cmd_GetWebFile(CommandContext& ctx)
     RETURN_IF_ERROR(ctx.readArgs(Required("path", path)));
 
     StaticFileHandler::Resolved file;
-    FILE* f = nullptr;
-
-    if (StaticFileHandler::Resolve(BASE_PATH, path, file))
-        f = fopen(file.path, "rb");
+    const bool found = StaticFileHandler::Resolve(path, file);
 
     // The header is a record; the body is raw bytes after it. The scope must therefore
     // close before the newline that divides them, hence the braces — the reply is not
     // one document, and ctx.out stays reachable alongside ctx.reply for exactly this.
-    if (!f)
+    if (!found)
     {
         // A real 404 — SPA fallback is the asking route layer's decision, not
         // ours (see StaticFileHandler::Resolve).
@@ -179,14 +183,16 @@ RequestError WebServerManager::Cmd_GetWebFile(CommandContext& ctx)
     }
     ctx.out.write("\n", 1);
 
-    // Streams out chunk-by-chunk through the session window; a 200 KB bundle
-    // never needs a 200 KB buffer here or on the transport.
-    char buf[512];
-    size_t r;
-    while ((r = fread(buf, 1, sizeof(buf), f)) > 0)
-        ctx.out.write(buf, r);
-
-    fclose(f);
+    // Still written in chunks through the session window rather than in one
+    // call: the bytes are addressable now that they live in flash-mapped rodata,
+    // but the transport underneath has a window and a 200 KB write would not fit
+    // through it any better than it did from FAT.
+    constexpr uint32_t kChunk = 512;
+    for (uint32_t sent = 0; sent < file.size; sent += kChunk)
+    {
+        const uint32_t n = (file.size - sent < kChunk) ? (file.size - sent) : kChunk;
+        ctx.out.write(reinterpret_cast<const char*>(file.data) + sent, n);
+    }
     return RequestError::Ok;
 }
 

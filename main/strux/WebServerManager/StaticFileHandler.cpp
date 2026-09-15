@@ -1,20 +1,19 @@
 #include "StaticFileHandler.h"
+#include "WebAssets.h"
 
 #include <cstdio>
 #include <cstring>
-#include <sys/stat.h>
 #include <esp_log.h>
 
 static constexpr const char* TAG = "StaticFileHandler";
 
-void StaticFileHandler::RegisterRoute(httpd_handle_t server, const char* basePath)
+void StaticFileHandler::RegisterRoute(httpd_handle_t server)
 {
-    // Store basePath as user_ctx so the static handler can access it
     const httpd_uri_t route = {
         .uri = "/*",
         .method = HTTP_GET,
         .handler = Handle,
-        .user_ctx = const_cast<char*>(basePath),
+        .user_ctx = nullptr,
         .is_websocket = false,
         .handle_ws_control_frames = false,
         .supported_subprotocol = nullptr,
@@ -31,6 +30,8 @@ const char* StaticFileHandler::GetContentType(const char* ext)
     if (strcmp(ext, ".png") == 0) return "image/png";
     if (strcmp(ext, ".ico") == 0) return "image/x-icon";
     if (strcmp(ext, ".svg") == 0) return "image/svg+xml";
+    if (strcmp(ext, ".woff2") == 0) return "font/woff2";
+    if (strcmp(ext, ".woff") == 0) return "font/woff";
     return "application/octet-stream";
 }
 
@@ -39,7 +40,7 @@ bool StaticFileHandler::IsSafePath(const char* uri)
     return strstr(uri, "..") == nullptr;
 }
 
-bool StaticFileHandler::Resolve(const char* basePath, const char* uri, Resolved& out)
+bool StaticFileHandler::Resolve(const char* uri, Resolved& out)
 {
     if (!IsSafePath(uri))
     {
@@ -60,27 +61,40 @@ bool StaticFileHandler::Resolve(const char* basePath, const char* uri, Resolved&
 
     if (uri[0] == '\0' || strcmp(uri, "/") == 0) uri = "/index.html";
 
-    // Callers over the wire may omit the leading slash.
-    const char* sep = (uri[0] == '/') ? "" : "/";
+    // Names in the blob are relative to www/ with no leading slash, but callers
+    // over the wire may send either form — so the slash is stripped here rather
+    // than being every caller's problem.
+    const char* name = (uri[0] == '/') ? uri + 1 : uri;
 
+    // Content type comes from the REQUESTED name, before any .gz is considered:
+    // the stored file may be `index.html.gz`, whose extension would otherwise
+    // resolve to octet-stream and leave the browser refusing the page.
     out.contentType = "application/octet-stream";
-    if (const char* ext = strrchr(uri, '.')) out.contentType = GetContentType(ext);
+    if (const char* ext = strrchr(name, '.')) out.contentType = GetContentType(ext);
 
-    // The build gzips everything into www/, so .gz is the common case, not the
-    // exception. `gzipped` must reach the client as Content-Encoding, or it
-    // receives gzip bytes labelled as JavaScript.
-    struct stat st;
-    snprintf(out.path, sizeof(out.path), "%s%s%s.gz", basePath, sep, uri);
-    if (stat(out.path, &st) == 0)
+    // Two places a file may be, and .gz is the COMMON case rather than the
+    // exception: vite gzips into www/, so the packer sees `index.html.gz` and
+    // stores it under that name with its own gzip flag CLEAR — re-compressing a
+    // gzip stream does not pay, so the packer correctly declined to. The stored
+    // bytes are still a gzip stream, and the only thing that says so is the
+    // name. Getting this wrong is not subtle: the browser is handed gzip bytes
+    // labelled text/html and shows nothing.
+    WebFile file;
+    if (WebAssets().Find(name, file))
     {
-        out.gzipped = true;
+        out.data = file.data;
+        out.size = file.size;
+        out.gzipped = file.gzipped;
         return true;
     }
 
-    snprintf(out.path, sizeof(out.path), "%s%s%s", basePath, sep, uri);
-    if (stat(out.path, &st) == 0)
+    char gzName[128];
+    const int n = snprintf(gzName, sizeof(gzName), "%s.gz", name);
+    if (n > 0 && static_cast<size_t>(n) < sizeof(gzName) && WebAssets().Find(gzName, file))
     {
-        out.gzipped = false;
+        out.data = file.data;
+        out.size = file.size;
+        out.gzipped = true;   // by virtue of the name, whatever the entry flag says
         return true;
     }
 
@@ -89,8 +103,6 @@ bool StaticFileHandler::Resolve(const char* basePath, const char* uri, Resolved&
 
 esp_err_t StaticFileHandler::Handle(httpd_req_t* req)
 {
-    const char* basePath = static_cast<const char*>(req->user_ctx);
-
     if (!IsSafePath(req->uri))
     {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid path");
@@ -98,23 +110,16 @@ esp_err_t StaticFileHandler::Handle(httpd_req_t* req)
     }
 
     Resolved file;
-    if (!Resolve(basePath, req->uri, file))
+    if (!Resolve(req->uri, file))
     {
         // SPA fallback lives here, in the route layer — not in Resolve(), which
         // stays "give me this exact file or nothing".
-        if (!Resolve(basePath, "/index.html", file))
+        if (!Resolve("/index.html", file))
         {
             httpd_resp_send_404(req);
             return ESP_OK;
         }
         file.contentType = "text/html";
-    }
-
-    FILE* f = fopen(file.path, "rb");
-    if (!f)
-    {
-        httpd_resp_send_404(req);
-        return ESP_OK;
     }
 
     httpd_resp_set_type(req, file.contentType);
@@ -129,8 +134,8 @@ esp_err_t StaticFileHandler::Handle(httpd_req_t* req)
     // not mean "do not cache" — it means the browser may guess, and Chrome guesses
     // yes. That is wrong in the worst way for the URLs here whose names are
     // deliberately STABLE: `/index.html` does not change when its contents do, so a
-    // www partition updated by OTA kept being served from disk cache and the new UI
-    // simply did not appear. Nothing was broken and nothing said so.
+    // UI updated by OTA kept being served from disk cache and the new page simply
+    // did not appear. Nothing was broken and nothing said so.
     //
     // Two rules, decided by whether the name identifies the bytes:
     //   /assets/<name>-<hash>.js  content-hashed by the build, so a change is a new
@@ -149,14 +154,9 @@ esp_err_t StaticFileHandler::Handle(httpd_req_t* req)
         "Cache-Control",
         hashedAsset ? "public, max-age=31536000, immutable" : "no-cache");
 
-    char readBuf[512];
-    size_t n;
-    while ((n = fread(readBuf, 1, sizeof(readBuf), f)) > 0)
-    {
-        httpd_resp_send_chunk(req, readBuf, n);
-    }
-    fclose(f);
-
-    httpd_resp_send_chunk(req, nullptr, 0);
+    // One send, straight out of the flash mapping. The old FAT path read through
+    // a 512-byte stack buffer because it had to; there is nothing to stream here
+    // — the bytes are already addressable and httpd copies them to the socket.
+    httpd_resp_send(req, reinterpret_cast<const char*>(file.data), file.size);
     return ESP_OK;
 }

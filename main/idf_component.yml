@@ -2,6 +2,34 @@ dependencies:
   idf:
     version: ">=5.0.0"
   espressif/mdns: ^1
+  # ST7796 panel for the WT-SC01 Plus, over an 8-bit i80/8080 bus. The
+  # component manager reads ONE manifest regardless of -DBOARD, so this is
+  # fetched for every board; only wt_sc01_plus/Display.h includes it, so it is
+  # never compiled into a DevKit or SuperMini image. The target rule keeps a
+  # plain-esp32 or esp32c3 configure from failing dependency solving over a
+  # component that only publishes esp32s3/p4 variants.
+  espressif/esp_lcd_st7796:
+    version: "^1"
+    rules:
+      - if: "target in [esp32s3, esp32p4]"
+  # FT6336U touch (FocalTech FT5x06 family) on the WT-SC01 Plus.
+  espressif/esp_lcd_touch_ft5x06:
+    version: "^1"
+    rules:
+      - if: "target in [esp32s3, esp32p4]"
+  # LVGL and its ESP-IDF port, for the touchscreen UI. Target-gated for the same
+  # reason as the panel drivers, and for one more: the component manager reads a
+  # single manifest regardless of -DBOARD, and an ungated LVGL would be compiled
+  # into the 4 MB, display-less C3 SuperMini image as well. The gate is on the
+  # TARGET rather than the board, which is the only axis rules can express here.
+  lvgl/lvgl:
+    version: "^9.2"
+    rules:
+      - if: "target in [esp32s3, esp32p4]"
+  espressif/esp_lvgl_port:
+    version: "^2"
+    rules:
+      - if: "target in [esp32s3, esp32p4]"
 # esp_websocket_client is deliberately absent: the relay drives a WebSocket through
 # the built-in tcp_transport layer instead, so the reading happens on the task that
 # runs the command. See Application/RelayManager/RelaySocket.h.

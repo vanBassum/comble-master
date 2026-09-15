@@ -1,0 +1,76 @@
+# ──────────────────────────────────────────────────────────────
+# Board overlay: Wireless-Tag WT-SC01 Plus. Overlays the root
+# sdkconfig.defaults and wins on conflicts (composed in the root CMakeLists).
+#
+# The chip itself is NOT set here. IDF resolves IDF_TARGET in an early pass
+# that cannot see -DBOARD, so a CONFIG_IDF_TARGET line here is read too late
+# and silently loses. Select the chip the ordinary way:
+#   idf.py -DBOARD=wt_sc01_plus set-target esp32s3
+#
+# Nothing is overridden yet, and the two things NOT set are the point of this
+# file — both are traps, and both are cheaper to read than to rediscover:
+#
+#   PSRAM. Our unit is an N16R2: 2 MB of EMBEDDED QUAD PSRAM, measured with
+#   esptool, not 8 MB octal. The Thermostat hit a different WT-SC01 Plus whose
+#   module was octal-capable and boot-looped on the wrong line mode:
+#     octal_psram: PSRAM chip is not connected, or wrong PSRAM line mode
+#   so do not assume either size or mode from the silkscreen. PSRAM is left
+#   disabled here — the panel demo runs out of internal RAM. Whoever turns it
+#   on for LVGL framebuffers wants
+#       CONFIG_SPIRAM=y
+#       CONFIG_SPIRAM_MODE_QUAD=y
+#   and should expect the drift guard to want a fresh sdkconfig afterwards.
+#   2 MB is tight for double 480x320x2 framebuffers (600 KB) plus heap, so
+#   check the numbers rather than assuming the Thermostat's 8 MB headroom.
+#
+#   FLASH SIZE. The bootloader detects 16 MB; the root defaults declare 4 MB and that
+#   is deliberately left alone. partitions.csv ends at exactly 0x400000, so
+#   nothing is lost, and raising it here would contradict a root default and
+#   trip the sdkconfig drift guard in the root CMakeLists. Growing the flash
+#   is a partition-table change first, and this line second.
+# ──────────────────────────────────────────────────────────────
+
+# ── PSRAM ──────────────────────────────────────────────────────
+# Now enabled, because LVGL plus the radio is a different memory budget from the
+# colour-bar demo that preceded it. QUAD is measured, not assumed: esptool reports
+# "Embedded PSRAM 2MB (AP_3v3)" for this unit (an S3R2). Getting the line mode
+# wrong does not degrade, it boot-loops:
+#   octal_psram: PSRAM chip is not connected, or wrong PSRAM line mode
+#
+# The LVGL draw buffers deliberately do NOT live here — they stay in internal DMA
+# RAM (buff_dma, buff_spiram=false in UiManager). Rendering into PSRAM makes every
+# redraw compete with the panel DMA for the same bus, which the Thermostat saw as
+# on-screen artifacts. PSRAM is here for the general heap, not the hot path.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_USE_MALLOC=y
+
+# ── Flash and partitions ───────────────────────────────────────
+# 16 MB, and this board's own partition table with it. The shared partitions.csv
+# said a per-board table buys nothing until the image outgrows 1.9 MB; it has,
+# so this is that note coming due rather than a change of mind. See
+# partitions_wt_sc01_plus.csv for the layout and why 8 MB of it is left blank.
+#
+# The retraction below is load-bearing. Flash size is a Kconfig CHOICE, so
+# selecting 16MB sets a DIFFERENT key rather than overwriting the root's 4MB one
+# — the root's assertion is not shadowed, it is falsified, and the drift guard
+# would fire on a correctly configured tree. Retracting the arm we are leaving
+# is the narrow, named way to say so; the 16MB line itself is still checked.
+# STRUX_DRIFT_EXEMPT: CONFIG_ESPTOOLPY_FLASHSIZE_4MB
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_wt_sc01_plus.csv"
+
+# ── LVGL fonts ─────────────────────────────────────────────────
+# Four sizes, because hierarchy on a 320x480 panel has to come from type and not
+# only from colour: 14 for secondary lines, 16 for the primary line of a row, 20
+# for screen titles, 28 for the wordmark on the home screen. Montserrat 14 alone
+# is what LVGL ships with, and a UI drawn entirely in it reads flat no matter how
+# the colours are arranged.
+#
+# About 60 KB of flash between them. That is affordable only because of the
+# partition change above — it would have left the old 1.94 MB slot with a margin
+# not worth having.
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_16=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_28=y

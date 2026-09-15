@@ -13,6 +13,7 @@
 class BoardContext;
 class StruxProvider;
 class LedManager;
+class BleHostManager;
 
 class AppProvider
 {
@@ -25,4 +26,7 @@ public:
 
     // ── This application's own managers ──
     virtual LedManager& getLedManager() = 0;
+
+    /// The BLE central. The UI drives scanning and pairing through this.
+    virtual BleHostManager& getBleHost() = 0;
 };

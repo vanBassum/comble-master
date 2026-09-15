@@ -29,7 +29,7 @@ public:
 
     void Init();
 
-    /// Copies the device name into `out`; falls back to "Strux" if the
+    /// Copies the device name into `out`; falls back to the firmware's project name if the
     /// stored value is empty.
     void GetDeviceName(char* out, size_t maxLen);
 
@@ -44,7 +44,13 @@ private:
     InitState initState_;
 
     // ── Settings (registered with SettingsManager in Init) ──
-    inline static StringSetting name_{ "device.name", "Device Name", "Strux" };
+    /// Empty by default ON PURPOSE: GetDeviceName() falls back to the firmware's
+    /// project name, so a fork gets its own identity from project() in the root
+    /// CMakeLists and never has to edit this framework file. The name reaches the
+    /// AP SSID, the DHCP hostname and the mDNS record, and mdns_hostname_set() is
+    /// given it RAW — so whatever a product stores here must be hostname-safe
+    /// (no spaces). Backport candidate for the template.
+    inline static StringSetting name_{ "device.name", "Device Name", "" };
 
     // ── WebSocket commands (registered with CommandManager in Init) ──
     RequestError Cmd_Ping(CommandContext& ctx);

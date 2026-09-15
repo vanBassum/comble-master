@@ -12,9 +12,13 @@ CONFIG_HTTPD_WS_SUPPORT=y
 # Increase timer task stack (default 2048 too small for WiFi calls in timer callbacks)
 CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096
 
-# FAT long filename support (needed for React build output)
-CONFIG_FATFS_LFN_HEAP=y
-CONFIG_FATFS_MAX_LFN=255
+# No FATFS options here any more. The React build used to live on a FAT `www`
+# partition, which needed long filenames for vite's content-hashed assets; it is
+# now packed into a blob and embedded in the app image (components/web_assets),
+# so the fatfs component is not in the build at all and these two lines named
+# symbols that no longer exist. The sdkconfig drift guard is what caught that —
+# it reported them as "absent entirely, its dependencies are unmet" rather than
+# letting a stale default sit here looking effective.
 
 # OTA rollback — pairs with esp_ota_mark_app_valid_cancel_rollback() in main.cpp
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
@@ -66,3 +70,31 @@ CONFIG_PM_DFS_INIT_AUTO=y
 # nothing for the relay's outbound socket, mDNS, SNTP or DHCP. A fork that adds a
 # second listener should read this before trusting the default again.
 CONFIG_LWIP_MAX_SOCKETS=16
+
+# ── BLE (NimBLE) ───────────────────────────────────────────────
+# The host is a BLE central: it scans for slaves and pairs with them.
+#
+# NVS_PERSIST is what makes ownership mean anything across a power cycle — a
+# bond in RAM only would hand every adapter back on reboot.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
+
+# NimBLE allocates from PSRAM, not from internal DRAM. This is not a tuning
+# preference — without it the stack takes the internal DMA-capable memory that
+# LVGL needs for its draw buffers, and lvgl_port_add_disp() fails outright:
+#   E LVGL: Not enough memory for LVGL buffer (buf2) allocation!
+#   E UiManager: lvgl_port_add_disp failed
+# i.e. the screen stays black the moment BLE is enabled. The same shortage also
+# surfaced as mbedtls_ssl_setup returning -0x7F00 on the relay's TLS handshake.
+#
+# The draw buffers themselves deliberately stay in INTERNAL RAM (buff_dma in
+# UiManager) — it is the radio that moves out, not the panel. Safe here only
+# because this board has PSRAM; the C3 slave has none and must not copy this.
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
+
+# One slave on the link at a time for now. Several simultaneous links are what
+# the eventual multi-COM-port host needs, and raising this is a deliberate step
+# to take with the UART transport, not a number to inflate in advance.
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_NIMBLE_MAX_BONDS=8

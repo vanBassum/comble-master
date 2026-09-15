@@ -1,8 +1,20 @@
 # ESP-IDF Partition Table
+#
+# No `www` partition: the frontend is packed into one blob at build time and
+# embedded in the app image (components/web_assets), so the UI travels with the
+# firmware instead of in a FAT filesystem beside it. Those 896 KB went to the
+# OTA slots, which is what made room for LVGL (~330 KB) and NimBLE.
+#
+# Still a 4 MB layout, deliberately: this file is shared with the C3 SuperMini
+# and the DevKit, which really are 4 MB parts. The SC01 Plus has 16 MB and could
+# take far more, but a per-board table costs a board overlay each and buys
+# nothing until the image outgrows 1.9 MB.
+#
+# App partitions must be 64K aligned; data partitions 4K aligned.
+#
 # Name,     Type,   SubType,    Offset,     Size,       Flags
 nvs,        data,   nvs,        0x9000,     0x6000,
 otadata,    data,   ota,        0xf000,     0x2000,
 phy_init,   data,   phy,        0x11000,    0x1000,
-ota_0,      app,    ota_0,      0x20000,    0x180000,
-ota_1,      app,    ota_1,      0x1A0000,   0x180000,
-www,        data,   fat,        0x320000,   0xE0000,
+ota_0,      app,    ota_0,      0x20000,    0x1F0000,
+ota_1,      app,    ota_1,      0x210000,   0x1F0000,

@@ -4,6 +4,8 @@
 #include "BoardContext.h"
 #include "StruxProvider.h"
 #include "LedManager/LedManager.h"
+#include "Ble/BleHostManager.h"
+#include "Ui/UiManager.h"
 
 // The application layer's context: owns this product's managers and answers AppProvider.
 //
@@ -30,15 +32,25 @@ public:
     void Init()
     {
         ledManager_.Init();
+        // Before the UI: the first thing the slaves screen does is ask
+        // this how many slaves are already owned.
+        bleHost_.Init();
+        ui_.Init();
     }
 
     StruxProvider& getStrux() override { return strux_; }
     BoardContext& getBoard() override { return board_; }
     LedManager& getLedManager() override { return ledManager_; }
+    BleHostManager& getBleHost() override { return bleHost_; }
 
 private:
     BoardContext& board_;
     StruxProvider& strux_;
 
     LedManager ledManager_{*this};
+
+    // The touchscreen UI. Deliberately absent from AppProvider: nothing else
+    // calls into it yet, and a manager earns its accessor when a peer needs it.
+    BleHostManager bleHost_{*this};
+    UiManager ui_{*this};
 };

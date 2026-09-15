@@ -1,0 +1,30 @@
+# ESP-IDF Partition Table — Wireless-Tag WT-SC01 Plus only.
+#
+# Selected by this board's sdkconfig.defaults, not by the root one. Every other
+# board keeps partitions.csv, which is the shared 4 MB layout and stays the
+# default — read that file first, it explains the shape both tables share.
+#
+# Why this board has its own: the SC01 Plus carries 16 MB (measured — the
+# bootloader detects 16384k on our N16R2), and the shared table's own note said
+# a per-board table buys nothing until the image outgrows 1.9 MB. It has. The
+# panel brings LVGL in, the UI brings fonts in, and at 1.84 MB against a
+# 1.94 MB slot the margin was down to a bad week. So the slot stops being the
+# constraint here rather than the image being trimmed to fit it.
+#
+# 4 MB per OTA slot, which is more than twice the present image and leaves room
+# for the fonts and screens this UI has yet to grow.
+#
+# The 8 MB above ota_1 is deliberately UNALLOCATED. A partition declared now
+# fixes an offset forever — an OTA cannot move one — and there is nothing to
+# put there yet: the frontend is embedded in the app image (see partitions.csv),
+# so the obvious candidate does not exist. Leaving it blank keeps the choice
+# open; declaring a storage partition speculatively does not.
+#
+# App partitions must be 64K aligned; data partitions 4K aligned.
+#
+# Name,     Type,   SubType,    Offset,     Size,       Flags
+nvs,        data,   nvs,        0x9000,     0x6000,
+otadata,    data,   ota,        0xf000,     0x2000,
+phy_init,   data,   phy,        0x11000,    0x1000,
+ota_0,      app,    ota_0,      0x20000,    0x400000,
+ota_1,      app,    ota_1,      0x420000,   0x400000,

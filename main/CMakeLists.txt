@@ -37,6 +37,8 @@ set(STRUX_SOURCES
 # ── The application. This is the list a fork owns.
 set(APP_SOURCES
     "app/LedManager/LedManager.cpp"
+    "app/Ui/UiManager.cpp"
+    "app/Ble/BleHostManager.cpp"
 )
 
 set(SOURCE_FILES_LIST
@@ -70,6 +72,8 @@ set(INCLUDE_DIRS_LIST
     "hardware"
     "app"
     "app/LedManager"
+    "app/Ui"
+    "app/Ble"
 )
 
 set(COMPONENT_REQUIRES
@@ -84,9 +88,11 @@ set(COMPONENT_REQUIRES
     app_update
     esp_partition
     spi_flash
-    fatfs
-    wear_levelling
     esp_driver_gpio
+    # NimBLE, for the link to the wireless UART slaves.
+    bt
+    # The embedded frontend, in place of the old FAT www partition.
+    web_assets
     mdns
     # Only to report the DFS bounds in `system info` — the scaling itself is
     # configured by startup code, see CONFIG_PM_ENABLE in sdkconfig.defaults.
@@ -128,6 +134,14 @@ include("${BOARD_DIR}/board.cmake")
 # The selected board folder is the ONLY one on the include path, so headers
 # included by name (e.g. BoardConfig.h) resolve to it.
 list(APPEND INCLUDE_DIRS_LIST "hardware/boards/${BOARD}")
+
+# Boards with a panel declare BOARD_HAS_DISPLAY in their board.cmake. Nothing
+# is added to the build from it today — DisplayDemo compiles everywhere and is
+# a no-op without BOARD_<NAME> — but it is the hook a real UI manager would use
+# to stay out of a headless image, and it belongs next to the flag that sets it.
+if(BOARD_HAS_DISPLAY)
+    message(STATUS "Board ${BOARD} has a display")
+endif()
 list(APPEND SOURCE_FILES_LIST ${BOARD_SOURCES})
 message(STATUS "Building for BOARD=${BOARD}")
 

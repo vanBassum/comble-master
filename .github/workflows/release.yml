@@ -11,7 +11,7 @@ permissions:
 
 env:
   IDF_VERSION: "v6.0"
-  PROJECT_NAME: "Strux"
+  PROJECT_NAME: "CombleMaster"
 
 jobs:
   # One leg per board in main/hardware/boards/. set-target picks the chip and
@@ -28,6 +28,8 @@ jobs:
             target: esp32
           - board: esp32c3_supermini
             target: esp32c3
+          - board: wt_sc01_plus
+            target: esp32s3
 
     steps:
       - name: Checkout

@@ -50,8 +50,8 @@ private:
     // webPassword_ live by reference — see Authenticator.h.
     Authenticator auth_{ webPassword_ };
 
-    void MountFatPartition();
     void StartServer();
+    void ReportWebAssets();
     void RegisterRoutes();
 
     // ── Commands (registered with CommandManager in Init) ──
