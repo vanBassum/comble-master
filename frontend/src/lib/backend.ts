@@ -483,6 +483,85 @@ class BackendService {
     return this.send<LedState>("led get")
   }
 
+  /** One frame of the device's own touchscreen, as the panel is drawing it.
+   *
+   *  The reply is not one document: a JSON header record, a newline, then the frame
+   *  as raw RGB565 (little-endian uint16, `stride` bytes per row) — the same shape
+   *  `web read` uses for a file. So it is read as a binary session and split at the
+   *  first newline, rather than parsed as JSON.
+   *
+   *  `scale` decimates on the DEVICE, which is the only place worth doing it: a full
+   *  320x480 frame is 300 KB and most of a second of radio time, while the same frame
+   *  at scale 2 is 75 KB and still more than a browser needs to show what the panel
+   *  is doing. */
+  async capturePanel(scale: 1 | 2 | 4 = 1): Promise<PanelFrame> {
+    const buf = await this.enqueue(async () => {
+      await this.ensureConnected()
+      const session = this.allocSession()
+      const reply = this.awaitReply<Uint8Array<ArrayBuffer>>(session, {
+        timeoutMs: 20000,
+        binary: true,
+      })
+      const body = new TextEncoder().encode(
+        JSON.stringify({ type: "ui screenshot", scale }) + "\n",
+      )
+      this.sendChunk(session, FLAG_FINAL, body)
+      return reply
+    })
+
+    const nl = buf.indexOf(0x0a)
+    if (nl < 0) throw new Error("capture reply had no header")
+
+    const header = JSON.parse(new TextDecoder().decode(buf.subarray(0, nl))) as {
+      ok: boolean
+      error?: string
+      screen: string
+      width: number
+      height: number
+      stride: number
+      scale: number
+      bytes: number
+    }
+    // A refusal (no display, out of memory) is a successful reply carrying ok:false,
+    // so it has to be read out of the payload or it becomes a zero-pixel "frame".
+    if (!header.ok) throw new Error(header.error ?? "capture failed")
+
+    const pixels = buf.subarray(nl + 1)
+    if (pixels.length < header.bytes)
+      throw new Error(`short frame: got ${pixels.length} of ${header.bytes} bytes`)
+
+    return {
+      screen: header.screen,
+      width: header.width,
+      height: header.height,
+      stride: header.stride,
+      scale: header.scale,
+      pixels,
+    }
+  }
+
+  /** Press the panel from here. Coordinates are in the panel's own pixels — 0,0 top
+   *  left, whatever `capturePanel` reported as width and height — and a "tap" is held
+   *  long enough on the device for LVGL to poll it, so it lands as a real press and
+   *  release rather than a blip between two polls. */
+  async touchPanel(
+    x: number,
+    y: number,
+    action: "tap" | "press" | "release" | "move" = "tap",
+  ): Promise<PanelTouchResult> {
+    return this.send<PanelTouchResult>("ui touch", {
+      x: Math.round(x),
+      y: Math.round(y),
+      action,
+    })
+  }
+
+  /** Put a named screen on the panel: home, settings, wifi, password, slaves, code,
+   *  pairing. Mostly a convenience for scripts — a person uses the panel itself. */
+  async gotoPanelScreen(screen: string): Promise<{ ok: boolean; screen?: string }> {
+    return this.send("ui goto", { screen })
+  }
+
   /** Turns the link indication on or off. Omitted fields are left alone by the
    *  device, so `{}` is a no-op that still reports the current state. */
   async setLed(params: { enabled?: boolean }): Promise<LedState> {
@@ -770,6 +849,27 @@ export interface DeviceInfo {
 // A product built from Strux deletes this pair along with LedManager and puts its
 // own feature's commands here — the demo is the only thing in this file that is not
 // framework.
+
+/** One captured frame of the device's panel. `pixels` is RGB565, little-endian, and
+ *  `stride` is its row pitch in BYTES — which is not always width*2, because the
+ *  device may send a decimated frame and LVGL is free to pad a row. */
+export interface PanelFrame {
+  screen: string
+  width: number
+  height: number
+  stride: number
+  scale: number
+  pixels: Uint8Array
+}
+
+export interface PanelTouchResult {
+  ok: boolean
+  error?: string
+  x?: number
+  y?: number
+  action?: string
+  screen?: string
+}
 
 export interface LedState {
   /** Whether the LED is showing the relay link at all. */

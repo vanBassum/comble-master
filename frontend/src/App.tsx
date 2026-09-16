@@ -3,6 +3,7 @@ import { AppSidebar, type Page } from "@/components/AppSidebar"
 import { useRoute } from "@/hooks/use-route"
 import { useAuth } from "@/hooks/use-auth"
 import HomePage from "@/pages/HomePage"
+import PanelPage from "@/pages/PanelPage"
 import ConsolePage from "@/pages/ConsolePage"
 import SettingsPage from "@/pages/SettingsPage"
 import FirmwarePage from "@/pages/FirmwarePage"
@@ -12,6 +13,8 @@ function PageContent({ page }: { page: Page }) {
   switch (page) {
     case "home":
       return <HomePage />
+    case "panel":
+      return <PanelPage />
     case "console":
       return <ConsolePage />
     case "settings":

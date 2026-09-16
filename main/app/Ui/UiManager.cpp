@@ -8,6 +8,7 @@
 #include "NetworkManager.h"
 #include "SettingsManager.h"
 #include "SystemManager.h"
+#include "CommandManager.h"
 #include "TimeManager.h"
 #include "DateTime.h"
 #include "Task.h"
@@ -15,6 +16,7 @@
 
 #include "lvgl.h"
 #include "esp_lvgl_port.h"
+#include "esp_heap_caps.h"
 
 #include <cstdio>
 #include <cstring>
@@ -106,6 +108,55 @@ namespace
     lv_obj_t *g_codeScreen     = nullptr;
     lv_obj_t *g_pairScreen     = nullptr;
 
+    // ── The remote pointer ──────────────────────────────
+    // A second POINTER input device beside the panel's own touch controller, reporting
+    // whatever the last `ui touch` said. LVGL polls it on its own task every refresh
+    // period, so a tap that arrives over the WebSocket travels the identical path a
+    // finger does — the same press, the same widget hit-test, the same event. Nothing
+    // in a screen knows which device pressed it, and nothing had to be written twice.
+    lv_indev_t *g_remoteIndev = nullptr;
+    int32_t     g_remoteX = 0;
+    int32_t     g_remoteY = 0;
+    bool        g_remotePressed = false;
+
+    void RemotePointerRead(lv_indev_t *, lv_indev_data_t *data)
+    {
+        data->point.x = g_remoteX;
+        data->point.y = g_remoteY;
+        data->state = g_remotePressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    }
+
+    /// The screens by name, for the two commands at the bottom of this file. Pointers
+    /// TO the variables rather than the screens: this table is written before a single
+    /// screen exists, the same deferral MakeTitleBar's back chevron relies on.
+    struct NamedScreen { const char *name; lv_obj_t **screen; };
+    constexpr NamedScreen kNamedScreens[] = {
+        { "home",     &g_homeScreen     },
+        { "settings", &g_settingsScreen },
+        { "wifi",     &g_wifiScreen     },
+        { "password", &g_passScreen     },
+        { "slaves",   &g_slavesScreen   },
+        { "code",     &g_codeScreen     },
+        { "pairing",  &g_pairScreen     },
+    };
+
+    lv_obj_t *ScreenByName(const char *name)
+    {
+        for (const auto &s : kNamedScreens)
+            if (strcmp(name, s.name) == 0) return *s.screen;
+        return nullptr;
+    }
+
+    /// What is on the panel right now, named. "?" only if a screen were loaded that
+    /// this file did not build, which nothing does.
+    const char *ActiveScreenName()
+    {
+        lv_obj_t *active = lv_screen_active();
+        for (const auto &s : kNamedScreens)
+            if (*s.screen == active) return s.name;
+        return "?";
+    }
+
     // ── Styles, built once in InitStyles() ─────────────────────
     lv_style_t g_stPlain;      // strips lv_obj's default chrome
     lv_style_t g_stCard;       // a row at rest
@@ -192,6 +243,21 @@ namespace
     constexpr lv_style_selector_t Pressed(lv_style_selector_t part)
     {
         return part | (lv_style_selector_t)LV_STATE_PRESSED;
+    }
+
+    /// A keyboard's control keys — the mode switch, enter, backspace, the hide-keyboard
+    /// key — are button-matrix buttons LVGL marks CHECKED, and the stock theme paints a
+    /// checked button in its light "selected" colour. On a dark keyboard that reads as
+    /// two or three keys someone forgot to style, so the state is answered here rather
+    /// than left to the theme.
+    constexpr lv_style_selector_t Checked(lv_style_selector_t part)
+    {
+        return part | (lv_style_selector_t)LV_STATE_CHECKED;
+    }
+
+    constexpr lv_style_selector_t CheckedPressed(lv_style_selector_t part)
+    {
+        return part | (lv_style_selector_t)(LV_STATE_CHECKED | LV_STATE_PRESSED);
     }
 
     void InitStyles()
@@ -534,6 +600,15 @@ namespace
         lv_obj_add_style(kb, &g_stKeys, LV_PART_MAIN);
         lv_obj_add_style(kb, &g_stKeysItem, LV_PART_ITEMS);
         lv_obj_set_style_bg_color(kb, lv_color_hex(kAccent), Pressed(LV_PART_ITEMS));
+
+        // Every key the same, control keys included. LOCAL styles rather than another
+        // lv_obj_add_style: a local style beats every added one whatever the theme did
+        // first, so there is no ordering to get right here later.
+        lv_obj_set_style_bg_color(kb, lv_color_hex(kSurface), Checked(LV_PART_ITEMS));
+        lv_obj_set_style_bg_opa(kb, LV_OPA_COVER, Checked(LV_PART_ITEMS));
+        lv_obj_set_style_text_color(kb, lv_color_hex(kText), Checked(LV_PART_ITEMS));
+        lv_obj_set_style_bg_color(kb, lv_color_hex(kAccent), CheckedPressed(LV_PART_ITEMS));
+        lv_obj_set_style_text_color(kb, lv_color_hex(kText), CheckedPressed(LV_PART_ITEMS));
     }
 
     // ──────────────────────────────────────────────────────────
@@ -1297,6 +1372,256 @@ namespace
     }
 }   // namespace
 
+// ──────────────────────────────────────────────────────────────
+// Commands. Both run on the TRANSPORT's task — the httpd task for a browser socket,
+// the relay's own for the pipe — and never on the LVGL task, so every LVGL call below
+// takes the port lock. What they deliberately do NOT do is hold it across the settle
+// delay: the per-screen refresh timers that fill a screen with data run on the LVGL
+// task, and holding the lock while waiting for them would starve exactly the work the
+// wait is for.
+// ──────────────────────────────────────────────────────────────
+
+namespace
+{
+    /// Put a screen on the panel and give its refresh timers time to fill it in.
+    /// RefreshSlaves and its siblings return early unless their own screen is the
+    /// active one, so a frame captured the instant after a load shows the layout
+    /// without the data — which is a screenshot of the wrong thing.
+    void LoadAndSettle(lv_obj_t *screen, uint32_t settleMs)
+    {
+        if (lvgl_port_lock(0))
+        {
+            lv_screen_load(screen);
+            lvgl_port_unlock();
+        }
+        vTaskDelay(pdMS_TO_TICKS(settleMs));
+    }
+
+    /// The reply for a name that is not one of ours. Form was fine — a string arrived
+    /// where a string was declared — so this is meaning, and meaning goes in the reply,
+    /// where it can carry the list of names that would have worked.
+    void ReplyUnknownScreen(CommandContext &ctx, const char *asked)
+    {
+        auto resp = ctx.reply.object();
+        resp.field("ok", false);
+        resp.field("error", "unknown screen");
+        resp.field("asked", asked);
+        auto known = resp.array("screens");
+        for (const auto &s : kNamedScreens) known.value(s.name);
+    }
+}
+
+RequestError UiManager::Cmd_Goto(CommandContext &ctx)
+{
+    char name[16] = {};
+    RETURN_IF_ERROR(ctx.readArgs(Required("screen", name)));
+
+    lv_obj_t *target = ScreenByName(name);
+    if (target == nullptr)
+    {
+        ReplyUnknownScreen(ctx, name);
+        return RequestError::Ok;
+    }
+
+    LoadAndSettle(target, 0);
+
+    auto resp = ctx.reply.object();
+    resp.field("ok", true);
+    resp.field("screen", name);
+    return RequestError::Ok;
+}
+
+RequestError UiManager::Cmd_Screenshot(CommandContext &ctx)
+{
+    char     name[16] = {};
+    uint32_t settleMs = 900;
+    uint32_t scale    = 1;
+    RETURN_IF_ERROR(ctx.readArgs(Optional("screen", name),
+                                 Optional("settle", settleMs),
+                                 Optional("scale",  scale)));
+
+    // 1, 2 or 4. Nearest-neighbour, applied on the way OUT rather than to the render:
+    // the snapshot is always full resolution, and every second or fourth pixel is what
+    // reaches the wire. A live view in a browser wants the quarter-size frame far more
+    // than it wants the detail — 300 KB a frame is most of a second of the radio.
+    if (scale != 1 && scale != 2 && scale != 4)
+    {
+        auto resp = ctx.reply.object();
+        resp.field("ok", false);
+        resp.field("error", "scale must be 1, 2 or 4");
+        return RequestError::Ok;
+    }
+
+    // No screen named means "whatever is on the panel", which is what makes this
+    // usable while somebody is driving the thing by hand.
+    if (name[0] != 0)
+    {
+        lv_obj_t *target = ScreenByName(name);
+        if (target == nullptr)
+        {
+            ReplyUnknownScreen(ctx, name);
+            return RequestError::Ok;
+        }
+        LoadAndSettle(target, settleMs);
+    }
+
+    const uint32_t w      = static_cast<uint32_t>(ScreenW());
+    const uint32_t h      = static_cast<uint32_t>(ScreenH());
+    const uint32_t stride = lv_draw_buf_width_to_stride(w, LV_COLOR_FORMAT_RGB565);
+    const uint32_t bytes  = stride * h;
+
+    // The frame buffer is ours, not LVGL's: lv_draw_buf_create() allocates from the
+    // builtin lv_malloc pool, which is 64 KB against the 300 KB a full frame needs.
+    // PSRAM has the room, and nothing in the hot path is affected — the DRAW buffers
+    // stay in internal DMA RAM for the reason Init() gives below. A capture happens
+    // once in a while, so rendering into slow memory costs nothing that matters.
+    uint8_t *pixels = static_cast<uint8_t *>(
+        heap_caps_aligned_alloc(64, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (pixels == nullptr)
+        pixels = static_cast<uint8_t *>(heap_caps_aligned_alloc(64, bytes, MALLOC_CAP_8BIT));
+    if (pixels == nullptr)
+    {
+        auto resp = ctx.reply.object();
+        resp.field("ok", false);
+        resp.field("error", "out of memory");
+        resp.field("bytes", bytes);
+        return RequestError::Ok;
+    }
+
+    bool taken = false;
+    if (lvgl_port_lock(0))
+    {
+        lv_draw_buf_t buf;
+        if (lv_draw_buf_init(&buf, w, h, LV_COLOR_FORMAT_RGB565, stride, pixels, bytes) == LV_RESULT_OK)
+            taken = lv_snapshot_take_to_draw_buf(lv_screen_active(),
+                                                 LV_COLOR_FORMAT_RGB565, &buf) == LV_RESULT_OK;
+        lvgl_port_unlock();
+    }
+
+    if (!taken)
+    {
+        heap_caps_free(pixels);
+        auto resp = ctx.reply.object();
+        resp.field("ok", false);
+        resp.field("error", "snapshot failed");
+        return RequestError::Ok;
+    }
+
+    const uint32_t outW = w / scale;
+    const uint32_t outH = h / scale;
+    const uint32_t outStride = outW * 2;
+
+    // A header record, a newline, then the frame as raw bytes — `web read`'s shape and
+    // for its reason: the reply is not one document, so the scope closes before the
+    // divider. RGB565 because that is what the panel itself holds; expanding it into
+    // something a PNG encoder likes is the caller's job and costs the device nothing.
+    // The dimensions reported are the ones SENT, so a scaled frame needs no agreement
+    // between the two ends about what the number means.
+    {
+        auto head = ctx.reply.object();
+        head.field("ok", true);
+        head.field("screen", ActiveScreenName());
+        head.field("width", outW);
+        head.field("height", outH);
+        head.field("stride", outStride);   // bytes per row, of what is on the wire
+        head.field("format", "rgb565");    // little-endian uint16 per pixel
+        head.field("scale", scale);
+        head.field("bytes", outStride * outH);
+    }
+    ctx.out.write("\n", 1);
+
+    // A row at a time, which is at most 640 bytes — inside the transport's window for
+    // the reason `web read` chunks at all, and the natural unit here because a scaled
+    // row is gathered from a source row rather than copied from it. The snapshot's own
+    // stride is read from the buffer rather than assumed to be width*2: LVGL is free
+    // to pad it.
+    uint16_t row[320];
+    for (uint32_t y = 0; y < outH; ++y)
+    {
+        const uint16_t *src = reinterpret_cast<const uint16_t *>(pixels + (y * scale) * stride);
+        if (scale == 1)
+        {
+            ctx.out.write(src, outStride);
+            continue;
+        }
+        for (uint32_t x = 0; x < outW; ++x)
+            row[x] = src[x * scale];
+        ctx.out.write(row, outStride);
+    }
+
+    heap_caps_free(pixels);
+    return RequestError::Ok;
+}
+
+RequestError UiManager::Cmd_Touch(CommandContext &ctx)
+{
+    uint32_t x = 0;
+    uint32_t y = 0;
+    char     action[10] = "tap";
+    RETURN_IF_ERROR(ctx.readArgs(Required("x", x),
+                                 Required("y", y),
+                                 Optional("action", action)));
+
+    const uint32_t w = static_cast<uint32_t>(ScreenW());
+    const uint32_t h = static_cast<uint32_t>(ScreenH());
+    if (x >= w || y >= h)
+    {
+        auto resp = ctx.reply.object();
+        resp.field("ok", false);
+        resp.field("error", "outside the panel");
+        resp.field("width", w);
+        resp.field("height", h);
+        return RequestError::Ok;
+    }
+
+    const bool tap     = strcmp(action, "tap") == 0;
+    const bool press   = strcmp(action, "press") == 0;
+    const bool release = strcmp(action, "release") == 0;
+    const bool move    = strcmp(action, "move") == 0;
+    if (!tap && !press && !release && !move)
+    {
+        auto resp = ctx.reply.object();
+        resp.field("ok", false);
+        resp.field("error", "action must be tap, press, release or move");
+        return RequestError::Ok;
+    }
+
+    if (lvgl_port_lock(0))
+    {
+        g_remoteX = static_cast<int32_t>(x);
+        g_remoteY = static_cast<int32_t>(y);
+        if (!release) g_remotePressed = !move;
+        else          g_remotePressed = false;
+        lvgl_port_unlock();
+    }
+
+    // A tap is a press somebody let go of, and the letting go cannot be in the same
+    // breath: LVGL polls its input devices on its own task, about every 30 ms, and a
+    // press that is gone before the next poll never happened. Held for kTapHoldMs, it
+    // is read several times — press, then release — which is exactly what a finger
+    // looks like from LVGL's side.
+    if (tap)
+    {
+        constexpr uint32_t kTapHoldMs = 120;
+        vTaskDelay(pdMS_TO_TICKS(kTapHoldMs));
+        if (lvgl_port_lock(0))
+        {
+            g_remotePressed = false;
+            lvgl_port_unlock();
+        }
+        // Long enough for the release to be read before the reply says it happened.
+        vTaskDelay(pdMS_TO_TICKS(60));
+    }
+
+    auto resp = ctx.reply.object();
+    resp.field("ok", true);
+    resp.field("x", x);
+    resp.field("y", y);
+    resp.field("action", action);
+    resp.field("screen", ActiveScreenName());
+    return RequestError::Ok;
+}
+
 void UiManager::Init()
 {
     auto init = initState_.TryBeginInit();
@@ -1363,6 +1688,14 @@ void UiManager::Init()
             ESP_LOGW(TAG, "lvgl_port_add_touch failed — UI will be read-only");
     }
 
+    // The wire's finger. Created before the screens so that the very first `ui touch`
+    // has somewhere to land, and given no cursor image — a pointer nobody can see is
+    // the point, since the person pressing it is looking at a screenshot.
+    g_remoteIndev = lv_indev_create();
+    lv_indev_set_type(g_remoteIndev, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_read_cb(g_remoteIndev, RemotePointerRead);
+    lv_indev_set_display(g_remoteIndev, disp);
+
     // Build under the lock: the LVGL task is already running by now.
     if (lvgl_port_lock(0))
     {
@@ -1392,6 +1725,10 @@ void UiManager::Init()
         lvgl_port_unlock();
     }
 
+    // Only reached on a board that HAS a panel, which is exactly where these two
+    // commands mean anything — so a display-less board never lists them.
+    app_.getStrux().getCommandManager().Register(this, commands_);
+
     lcd.Backlight(true);   // first frame is up — light the panel
 
     init.SetReady();
@@ -1406,6 +1743,36 @@ void UiManager::Init()
     if (!init) return;
     ESP_LOGD(TAG, "This board has no display; no UI to build");
     init.SetReady();
+}
+
+// Never registered here, so never reachable — but the command table in the header
+// takes their addresses, so they have to link. They answer rather than abort, in case a
+// future board ever registers them by mistake.
+RequestError UiManager::Cmd_Goto(CommandContext &ctx)
+{
+    RETURN_IF_ERROR(ctx.readArgs());
+    auto resp = ctx.reply.object();
+    resp.field("ok", false);
+    resp.field("error", "no display on this board");
+    return RequestError::Ok;
+}
+
+RequestError UiManager::Cmd_Screenshot(CommandContext &ctx)
+{
+    RETURN_IF_ERROR(ctx.readArgs());
+    auto resp = ctx.reply.object();
+    resp.field("ok", false);
+    resp.field("error", "no display on this board");
+    return RequestError::Ok;
+}
+
+RequestError UiManager::Cmd_Touch(CommandContext &ctx)
+{
+    RETURN_IF_ERROR(ctx.readArgs());
+    auto resp = ctx.reply.object();
+    resp.field("ok", false);
+    resp.field("error", "no display on this board");
+    return RequestError::Ok;
 }
 
 #endif

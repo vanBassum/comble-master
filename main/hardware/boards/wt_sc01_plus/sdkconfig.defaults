@@ -74,3 +74,10 @@ CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_MONTSERRAT_16=y
 CONFIG_LV_FONT_MONTSERRAT_20=y
 CONFIG_LV_FONT_MONTSERRAT_28=y
+
+# ── Screenshots ───────────────────────────────────────
+# lv_snapshot_take_to_draw_buf(), which is the whole of `ui screenshot`. Default n in
+# LVGL's own Kconfig, so it has to be asked for. About 2 KB of flash, and it allocates
+# nothing until a capture is asked for — the frame buffer is the caller's (UiManager
+# takes it from PSRAM, not from LVGL's 64 KB lv_malloc pool).
+CONFIG_LV_USE_SNAPSHOT=y
