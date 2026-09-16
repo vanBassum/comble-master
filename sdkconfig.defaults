@@ -98,3 +98,11 @@ CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
 # to take with the UART transport, not a number to inflate in advance.
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
 CONFIG_BT_NIMBLE_MAX_BONDS=8
+# NimBLE logs every GAP procedure it starts at INFO — four lines per discovery, and a
+# host scanning on a loop starts one every few seconds forever:
+#   NimBLE: GAP procedure initiated: discovery;
+#   NimBLE: own_addr_type=0 filter_policy=0 passive=0 limited=0 filter_duplicates=0
+# None of it is actionable, and all of it goes out over the console broadcast to every
+# attached browser as well as the UART. WARNING keeps what is: host resets, and the
+# errors that explain a failed pairing.
+CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
