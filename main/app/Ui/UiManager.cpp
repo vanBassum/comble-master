@@ -9,6 +9,7 @@
 #include "SettingsManager.h"
 #include "SystemManager.h"
 #include "CommandManager.h"
+#include "RelayManager.h"
 #include "TimeManager.h"
 #include "DateTime.h"
 #include "Task.h"
@@ -16,6 +17,7 @@
 
 #include "lvgl.h"
 #include "esp_lvgl_port.h"
+#include "CandidateIcons.h"
 #include "esp_heap_caps.h"
 
 #include <cstdio>
@@ -78,6 +80,13 @@ namespace
     constexpr uint32_t kIdle      = 0x4B5563;   // known but not here
     constexpr uint32_t kWarn      = 0xF5A524;   // somebody else's
     constexpr uint32_t kDanger    = 0xE5484D;   // failed
+
+    // The relay-status mark, picked off the ten-candidate strip this bar used to
+    // draw in place of the radios. C7 was the rightmost of them. CandidateIcons.h
+    // still carries the whole shortlist so trying another is this one line — the
+    // nine unused masks are file-scope statics in a single translation unit, so
+    // they cost nothing in flash until one is named here.
+    constexpr const lv_image_dsc_t *kRelayIcon = &kIcon_c7;
 
     // ── Metrics (320x480 portrait) ─────────────────────────────
     constexpr int kPad     = 14;   // side gutter, everywhere
@@ -179,6 +188,7 @@ namespace
         lv_obj_t *clock;
         lv_obj_t *wifi;
         lv_obj_t *ble;
+        lv_obj_t *relay;   // an lv_image, not a label — recoloured, not retexted
     };
     constexpr int kMaxStatusBars = 8;
     StatusBar g_status[kMaxStatusBars] = {};
@@ -414,8 +424,23 @@ namespace
         lv_obj_t *ble = MakeLabel(bar, LV_SYMBOL_BLUETOOTH, kTextFaint, &lv_font_montserrat_14);
         lv_obj_align(ble, LV_ALIGN_RIGHT_MID, rightEdge - 24, 0);
 
+        // The relay link, left of the two radios, because it reads as the third
+        // thing in the same sentence: Wi-Fi says we have an uplink, Bluetooth says
+        // we can hear the adapters, this says the uplink reaches the Strux server.
+        //
+        // An A8 mask rather than a font glyph (CandidateIcons.h, generated), so the
+        // shape is the asset and the colour is a style — which is what lets
+        // RefreshStatus swap it exactly as it swaps the two labels beside it.
+        // Starts faint: the link is down until RelayManager says otherwise, and a
+        // strip that lights up before the first refresh would lie for 500 ms.
+        lv_obj_t *relay = lv_image_create(bar);
+        lv_image_set_src(relay, kRelayIcon);
+        lv_obj_set_style_image_recolor_opa(relay, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_image_recolor(relay, lv_color_hex(kTextFaint), LV_PART_MAIN);
+        lv_obj_align(relay, LV_ALIGN_RIGHT_MID, rightEdge - 48, 0);
+
         if (g_statusCount < kMaxStatusBars)
-            g_status[g_statusCount++] = StatusBar{ clock, wifi, ble };
+            g_status[g_statusCount++] = StatusBar{ clock, wifi, ble, relay };
         else
             ESP_LOGW(TAG, "More status bars than the refresh list holds");
     }
@@ -635,11 +660,20 @@ namespace
             (bs == BleHostManager::State::Idle)   ? kTextFaint :
             (bs == BleHostManager::State::Failed) ? kDanger    : kAccent;
 
+        // Two states only, and deliberately so: the pipe to the Strux server is up
+        // or it is not. `relay.enabled` off looks the same as unreachable, which is
+        // the truth from this strip's point of view — the Relay card in settings is
+        // where the difference between "off" and "trying" belongs.
+        const uint32_t relayColor =
+            g_app->getStrux().getRelayManager().IsConnected() ? kAccent : kTextFaint;
+
         for (int i = 0; i < g_statusCount; ++i)
         {
             lv_label_set_text(g_status[i].clock, clock);
             lv_obj_set_style_text_color(g_status[i].wifi, lv_color_hex(wifiColor), LV_PART_MAIN);
             lv_obj_set_style_text_color(g_status[i].ble,  lv_color_hex(bleColor),  LV_PART_MAIN);
+            lv_obj_set_style_image_recolor(g_status[i].relay, lv_color_hex(relayColor),
+                                           LV_PART_MAIN);
         }
     }
 
