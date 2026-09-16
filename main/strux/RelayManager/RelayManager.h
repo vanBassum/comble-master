@@ -27,11 +27,21 @@ class RelayManager
 {
     static constexpr const char* TAG = "RelayManager";
 
-    // Reply window. Larger than the local socket's 512 because every chunk is a
-    // WAN round trip's worth of framing, and frontend bundles are the common
-    // payload. NOT payload-proportional — a file of any size streams window by
-    // window.
-    static constexpr size_t SESSION_WINDOW = 1024;
+    // Reply window, and the same number as the local socket's now — for the reason
+    // that raised it there, doubled by TLS. Every chunk is a WAN round trip's worth
+    // of framing, AND on a wss:// pipe esp-tls emits one TLS RECORD per write: its
+    // own header, its own tag, its own encrypt call, its own send. So the chunk size
+    // sets the record count, and at 1024 a 300 KB panel capture was ~300 of them.
+    //
+    // Worth being precise about what that costs, because the obvious suspect is
+    // wrong: the cipher is not the problem. The S3 does AES-GCM in hardware at
+    // megabytes a second, so 300 KB of bulk encryption is milliseconds. What hurts
+    // is doing it three hundred times with a syscall and a TCP segment each.
+    //
+    // NOT payload-proportional — a file of any size still streams window by window.
+    // Measured on the local socket, where the same change is easy to isolate: a full
+    // capture went 797 ms -> 531 ms going from 512 to 4096.
+    static constexpr size_t SESSION_WINDOW = 4096;
 
     // Must match the largest chunk a client sends (the frontend sizes upload
     // chunks to the local transport's 4096).
