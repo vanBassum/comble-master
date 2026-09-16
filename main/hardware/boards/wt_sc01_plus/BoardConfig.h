@@ -22,6 +22,27 @@
 
 namespace BoardConfig
 {
+    // ── USB: how many Comble COM ports this board can expose ───────
+    // One. That is a property of the silicon and this board's wiring, not a
+    // number anybody gets to configure — see UsbPortManager for the model that
+    // reads it.
+    //
+    // The ceiling is TWO and the arithmetic is in the endpoints, not in the
+    // stack: a CDC-ACM function costs two IN endpoints (a notification
+    // interrupt IN and a bulk IN), and the S3's USB-OTG has four non-zero IN
+    // endpoints with dedicated TX FIFOs (OTG_NUM_EPS 6, OTG_NUM_IN_EPS 5, four
+    // OTG_TX_DINEP_DFIFO_DEPTH_n in soc/esp32s3/include/soc/usb_dwc_cfg.h).
+    // Four divided by two is two, which is also why esp_tinyusb caps
+    // TINYUSB_CDC_COUNT at "range 1 2" — component and chip agree.
+    //
+    // We ship ONE of those two, deliberately. The radio holds one link at a
+    // time (CONFIG_BT_NIMBLE_MAX_CONNECTIONS in the root sdkconfig.defaults),
+    // and the second CDC would otherwise have to be spent on keeping the
+    // development cycle alive once TinyUSB takes the connector away from
+    // USB-Serial/JTAG. A host that wants several ports is a different chip, and
+    // it says so here rather than anywhere else in the tree.
+    static constexpr int USB_COM_PORTS = 1;
+
     // LED — no user LED is fitted. The only thing resembling one is the LCD
     // backlight on GPIO45, which belongs to the display, not to the Led role.
     // BoardContext binds MockLed so the role is still satisfied.

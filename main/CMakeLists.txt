@@ -39,6 +39,7 @@ set(APP_SOURCES
     "app/LedManager/LedManager.cpp"
     "app/Ui/UiManager.cpp"
     "app/Ble/BleHostManager.cpp"
+    "app/Usb/UsbPortManager.cpp"
 )
 
 set(SOURCE_FILES_LIST
@@ -74,6 +75,7 @@ set(INCLUDE_DIRS_LIST
     "app/LedManager"
     "app/Ui"
     "app/Ble"
+    "app/Usb"
 )
 
 set(COMPONENT_REQUIRES

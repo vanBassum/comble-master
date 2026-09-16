@@ -15,6 +15,10 @@ namespace BoardConfig
     static constexpr int LED_PIN = 2;
     static constexpr bool LED_ACTIVE_HIGH = true;
 
+    // USB: this chip has no USB device peripheral at all, so it can expose no
+    // Comble COM ports. UsbPortManager reads this and registers nothing.
+    static constexpr int USB_COM_PORTS = 0;
+
     // Add project-specific pin definitions below.
     // Examples:
     //   static constexpr int MODBUS_TX_PIN = 17;

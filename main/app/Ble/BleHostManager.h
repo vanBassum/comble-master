@@ -75,6 +75,25 @@ public:
         char    name[32];
         bool    inRange;
         int8_t  rssi;
+
+        /// Milliseconds since boot when this slave was last heard advertising, or 0
+        /// if it has not been heard at all since the device came up. `inRange` only
+        /// answers "right now" and a scan result is dropped after kResultHoldMs, so
+        /// without this a slave that was switched off a minute ago is indistinguishable
+        /// from one that has never been in the room — which is the difference between
+        /// "out of range" and "idle" on the panel. RAM only: a time since boot means
+        /// nothing after a reboot, so it is deliberately not in the roster's NVS record.
+        uint32_t lastSeenMs;
+    };
+
+    /// What this host is doing with one particular slave. Asked per row by the UI, so
+    /// that nothing outside has to know about the pending address or read the state
+    /// enum and guess which slave it refers to.
+    enum class Link : uint8_t
+    {
+        None,        ///< no link, and none being made
+        Connecting,  ///< connecting or pairing, this one
+        Connected,   ///< the link is up
     };
 
     enum class State : uint8_t
@@ -115,6 +134,11 @@ public:
     int GetPaired(PairedSlave *out, int max) const;
 
     State GetState() const { return state_; }
+
+    /// The link state of ONE slave, by address. State() alone cannot answer this:
+    /// it says what the radio is doing, not who it is doing it with.
+    Link LinkFor(const uint8_t addr[6]) const;
+
     const char *LastName() const { return lastName_; }
 
     /// Connect to a discovered slave and pair with it using `passkey`.

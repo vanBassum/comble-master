@@ -27,6 +27,12 @@ namespace BoardConfig
     //   GPIO20/GPIO21 UART0 RX/TX (broken out, free if the console is on USB)
     // Everything else (GPIO0-GPIO7, GPIO10) is free.
 
+    // USB: none available to us. The C3 has USB Serial/JTAG and no USB-OTG,
+    // and Serial/JTAG is a fixed single CDC whose descriptors are the ROM's —
+    // there is no second port to hand out and no way to name the first one.
+    // UsbPortManager reads this and registers nothing.
+    static constexpr int USB_COM_PORTS = 0;
+
     // Add project-specific pin definitions below.
     // Examples:
     //   static constexpr int MODBUS_TX_PIN = 21;

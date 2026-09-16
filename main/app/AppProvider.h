@@ -14,6 +14,7 @@ class BoardContext;
 class StruxProvider;
 class LedManager;
 class BleHostManager;
+class UsbPortManager;
 
 class AppProvider
 {
@@ -29,4 +30,8 @@ public:
 
     /// The BLE central. The UI drives scanning and pairing through this.
     virtual BleHostManager& getBleHost() = 0;
+
+    /// Which slave sits on which USB COM port. Knows nothing about the radio; the UI
+    /// is what joins an assignment to the slave's live state.
+    virtual UsbPortManager& getUsbPorts() = 0;
 };

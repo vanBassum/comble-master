@@ -5,6 +5,7 @@
 #include "StruxProvider.h"
 #include "LedManager/LedManager.h"
 #include "Ble/BleHostManager.h"
+#include "Usb/UsbPortManager.h"
 #include "Ui/UiManager.h"
 
 // The application layer's context: owns this product's managers and answers AppProvider.
@@ -32,6 +33,9 @@ public:
     void Init()
     {
         ledManager_.Init();
+        // Before the UI as well, and for the same reason: the USB port screen reads
+        // its assignments the moment it is built.
+        usbPorts_.Init();
         // Before the UI: the first thing the slaves screen does is ask
         // this how many slaves are already owned.
         bleHost_.Init();
@@ -42,6 +46,7 @@ public:
     BoardContext& getBoard() override { return board_; }
     LedManager& getLedManager() override { return ledManager_; }
     BleHostManager& getBleHost() override { return bleHost_; }
+    UsbPortManager& getUsbPorts() override { return usbPorts_; }
 
 private:
     BoardContext& board_;
@@ -52,5 +57,6 @@ private:
     // The touchscreen UI. Deliberately absent from AppProvider: nothing else
     // calls into it yet, and a manager earns its accessor when a peer needs it.
     BleHostManager bleHost_{*this};
+    UsbPortManager usbPorts_{*this};
     UiManager ui_{*this};
 };

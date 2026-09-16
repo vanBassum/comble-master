@@ -387,12 +387,16 @@ int BleHostManager::GetPaired(PairedSlave *out, int max) const
             snprintf(s.name, sizeof(s.name), "%02X%02X%02X%02X%02X%02X",
                      s.addr[0], s.addr[1], s.addr[2], s.addr[3], s.addr[4], s.addr[5]);
 
+        for (int j = 0; j < rosterCount_; ++j)
+            if (memcmp(roster_[j].addr, s.addr, 6) == 0) { s.lastSeenMs = roster_[j].lastSeenMs; break; }
+
         for (int j = 0; j < resultCount_; ++j)
         {
             if (memcmp(results_[j].addr, s.addr, 6) == 0)
             {
                 s.inRange = true;
                 s.rssi = results_[j].rssi;
+                s.lastSeenMs = results_[j].lastSeenMs;
                 break;
             }
         }
@@ -516,6 +520,38 @@ void BleHostManager::AddOrUpdate(const struct ble_gap_disc_desc *disc)
     }
 
     s.bonded = AddressIsBonded(s.addr);
+
+    // Remember WHEN, on the roster entry as well as the scan result. The result is
+    // aged out after kResultHoldMs; the roster entry lives for the whole boot, which
+    // is what lets a row say "out of range, 3 min ago" instead of falling back to the
+    // same "idle" as a slave that has never been seen.
+    if (s.bonded)
+    {
+        for (int i = 0; i < rosterCount_; ++i)
+        {
+            if (memcmp(roster_[i].addr, s.addr, 6) != 0) continue;
+            roster_[i].lastSeenMs = s.lastSeenMs;
+            break;
+        }
+    }
+}
+
+BleHostManager::Link BleHostManager::LinkFor(const uint8_t addr[6]) const
+{
+    // pendingAddr_ is who the radio is busy with; the state says how far along. A
+    // slave that is not that one has no link whatever the radio is doing.
+    if (memcmp(addr, pendingAddr_, 6) != 0) return Link::None;
+
+    switch (state_)
+    {
+    case State::Connecting:
+    case State::Pairing:
+        return Link::Connecting;
+    case State::Paired:
+        return Link::Connected;
+    default:
+        return Link::None;
+    }
 }
 
 // ──────────────────────────────────────────────────────────────

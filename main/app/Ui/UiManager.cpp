@@ -14,11 +14,13 @@
 #include "DateTime.h"
 #include "Task.h"
 #include "Ble/BleHostManager.h"
+#include "Usb/UsbPortManager.h"
 
 #include "lvgl.h"
 #include "esp_lvgl_port.h"
 #include "CandidateIcons.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 
 #include <cstdio>
 #include <cstring>
@@ -116,6 +118,8 @@ namespace
     lv_obj_t *g_slavesScreen   = nullptr;
     lv_obj_t *g_codeScreen     = nullptr;
     lv_obj_t *g_pairScreen     = nullptr;
+    lv_obj_t *g_usbScreen      = nullptr;
+    lv_obj_t *g_usbPickScreen  = nullptr;
 
     // ── The remote pointer ──────────────────────────────
     // A second POINTER input device beside the panel's own touch controller, reporting
@@ -147,6 +151,8 @@ namespace
         { "slaves",   &g_slavesScreen   },
         { "code",     &g_codeScreen     },
         { "pairing",  &g_pairScreen     },
+        { "usb",      &g_usbScreen      },
+        { "usbpick",  &g_usbPickScreen  },
     };
 
     lv_obj_t *ScreenByName(const char *name)
@@ -181,7 +187,7 @@ namespace
     // Every screen carries its own copy of the strip, so the widgets are per
     // screen and a single global pair of labels would only ever update the last
     // one built. They register here instead and the refresh timer walks the lot;
-    // there are six screens, so the loop is cheaper than the bookkeeping any
+    // there are nine screens, so the loop is cheaper than the bookkeeping any
     // cleverer scheme would need.
     struct StatusBar
     {
@@ -190,18 +196,42 @@ namespace
         lv_obj_t *ble;
         lv_obj_t *relay;   // an lv_image, not a label — recoloured, not retexted
     };
-    constexpr int kMaxStatusBars = 8;
+    // One per screen, and adding a screen without raising this is a silent bug: the
+    // extra strip is built and drawn, but never registered, so its clock stays blank
+    // and its radio glyphs never change colour while every other screen's do. It logs
+    // a warning when it overflows — which is how the USB ports screen was caught being
+    // the ninth. Sized with room to grow rather than to the exact count.
+    constexpr int kMaxStatusBars = 12;
     StatusBar g_status[kMaxStatusBars] = {};
     int g_statusCount = 0;
 
-    // ── Home list cache ────────────────────────────────────────
-    // What the home list last drew, so it is rebuilt only when something really
-    // changed — an LVGL list rebuilt under a finger eats the tap.
+    // ── Home list ───────────────────────────────────
+    // ONE list, and one row shape for every slave this device knows about, paired or
+    // not. The split into PAIRED and FOUND sections is gone: it made the panel answer
+    // a question about our bond table when the question being asked is "what is around
+    // me and what is it doing". A slave does not move between sections when it is
+    // switched on — its dot and its line of text change, and it stays where it was.
+    //
+    // What is cached here is the RENDERED row, not the scan data it came from. That is
+    // what makes the redraw test honest: the link coming up changes no byte of
+    // PairedSlave, so comparing the raw data would have missed exactly the transition
+    // the list exists to show.
     lv_obj_t *g_homeList = nullptr;
-    BleHostManager::PairedSlave g_homePaired[BleHostManager::kMaxPaired] = {};
-    int  g_homePairedCount = 0;
-    BleHostManager::Slave g_homeFound[BleHostManager::kMaxResults] = {};
-    int  g_homeFoundCount = 0;
+
+    struct SlaveRow
+    {
+        char        name[32];
+        char        value[16];   // RSSI while visible, or how long ago it was
+        const char *status;      // the one line under the name
+        uint32_t    dot;
+        uint32_t    statusColor;
+        int8_t      rssi;        // for ordering; -128 when not visible
+        uint8_t     rank;        // ordering class, see BuildSlaveRows
+    };
+
+    constexpr int kMaxHomeRows = BleHostManager::kMaxPaired + BleHostManager::kMaxResults;
+    SlaveRow g_homeRows[kMaxHomeRows] = {};
+    int      g_homeRowCount = 0;
 
     // ── Wi-Fi screen ───────────────────────────────────────────
     lv_obj_t *g_wifiCardName  = nullptr;   // SSID, or the mode we are in
@@ -450,7 +480,12 @@ namespace
     /// `backTo` is a POINTER TO the screen variable, not the screen: headers are
     /// built before every screen exists, and taking the address defers the read
     /// to the moment the chevron is actually tapped.
-    lv_obj_t *MakeTitleBar(lv_obj_t *parent, const char *title, lv_obj_t **backTo)
+    /// `titleOut`, when given, hands back the TITLE LABEL rather than the bar — for
+    /// the one screen whose heading names the thing being edited and so changes as
+    /// it is opened. The return value stays the bar, which is what every other
+    /// caller ignores.
+    lv_obj_t *MakeTitleBar(lv_obj_t *parent, const char *title, lv_obj_t **backTo,
+                           lv_obj_t **titleOut = nullptr)
     {
         lv_obj_t *bar = lv_obj_create(parent);
         lv_obj_add_style(bar, &g_stPlain, LV_PART_MAIN);
@@ -460,6 +495,7 @@ namespace
 
         lv_obj_t *lbl = MakeLabel(bar, title, kText, &lv_font_montserrat_20);
         lv_obj_center(lbl);
+        if (titleOut) *titleOut = lbl;
 
         if (backTo)
         {
@@ -491,15 +527,6 @@ namespace
 
     /// A small dim heading between groups of cards. Not a card itself — it sits
     /// in the gutter between them, which is what makes the grouping read.
-    lv_obj_t *MakeSection(lv_obj_t *panel, const char *text)
-    {
-        lv_obj_t *l = MakeLabel(panel, text, kTextFaint, &lv_font_montserrat_14);
-        lv_obj_set_style_text_letter_space(l, 1, LV_PART_MAIN);
-        lv_obj_set_style_pad_left(l, 4, LV_PART_MAIN);
-        lv_obj_set_style_pad_top(l, 6, LV_PART_MAIN);
-        return l;
-    }
-
     /// The base every tappable card starts from.
     lv_obj_t *MakeCard(lv_obj_t *panel, int h)
     {
@@ -1229,6 +1256,338 @@ namespace
     // exists; a row that opens a screen drawing placeholder data would be worse
     // than its absence.
     // ──────────────────────────────────────────────────────────
+    // ────────────────────────── USB serial ports ──────────────────────────
+    // Two screens: the ports themselves, and the picker that assigns one.
+    //
+    // The join between "which slave is on COM1" and "what is that slave doing" happens
+    // HERE and nowhere else. UsbPortManager stores an address and never asks the radio
+    // anything; BleHostManager knows the radio and nothing about ports. A row is the
+    // one place the two are read together, which is what keeps an assignment surviving
+    // a slave being switched off, out of range, or released entirely — the last of
+    // which this list says out loud rather than quietly dropping.
+    //
+    // There is no stepper any more. The screen used to open on a "COM ports 1..4"
+    // control, which read as a preference and was not one: the count is the board's
+    // endpoint budget (BoardConfig::USB_COM_PORTS), fixed before boot. So the list is
+    // simply as long as the host is wide — one row on this board — and the only choice
+    // on offer is the one the user actually has, which slave sits on the port.
+
+    lv_obj_t *g_usbList      = nullptr;
+    lv_obj_t *g_usbPickList  = nullptr;
+    lv_obj_t *g_usbPickTitle = nullptr;
+    int       g_usbPickPort  = 0;         // which port the picker is editing
+
+    struct PortRow
+    {
+        char        com[8];     // "COM1"
+        char        port[10];   // "Port 1"
+        char        name[32];   // the slave, or "(unassigned)"
+        char        value[16];  // RSSI while visible
+        const char *status;
+        uint32_t    dot;
+        uint32_t    statusColor;
+    };
+
+    PortRow g_usbRows[UsbPortManager::kMaxPorts] = {};
+    int     g_usbRowCount = 0;
+
+    /// Describe one port: what is on it, and what that thing is doing. The state
+    /// vocabulary is the home screen's, deliberately — a slave should not be called
+    /// one thing on one screen and another on the next.
+    void FillPortRow(PortRow &r, int port)
+    {
+        auto &usb = g_app->getUsbPorts();
+        auto &ble = g_app->getBleHost();
+
+        snprintf(r.com, sizeof(r.com), "COM%d", port);
+        snprintf(r.port, sizeof(r.port), "Port %d", port);
+
+        uint8_t addr[6] = {};
+        if (!usb.Assignment(port, addr))
+        {
+            snprintf(r.name, sizeof(r.name), "(unassigned)");
+            r.status = "Available";
+            r.dot = kIdle;
+            r.statusColor = kTextFaint;
+            return;
+        }
+
+        BleHostManager::PairedSlave paired[BleHostManager::kMaxPaired];
+        const int np = ble.GetPaired(paired, BleHostManager::kMaxPaired);
+        for (int i = 0; i < np; ++i)
+        {
+            if (memcmp(paired[i].addr, addr, 6) != 0) continue;
+            const BleHostManager::PairedSlave &sl = paired[i];
+
+            snprintf(r.name, sizeof(r.name), "%s", sl.name[0] ? sl.name : "Unnamed slave");
+
+            const BleHostManager::Link link = ble.LinkFor(sl.addr);
+            if (link == BleHostManager::Link::Connected)
+            {
+                r.status = "Connected"; r.dot = kOk; r.statusColor = kOk;
+            }
+            else if (link == BleHostManager::Link::Connecting)
+            {
+                r.status = "Connecting..."; r.dot = kAccent; r.statusColor = kAccent;
+            }
+            else if (sl.inRange)
+            {
+                r.status = "In range"; r.dot = kOk; r.statusColor = kOk;
+            }
+            else if (sl.lastSeenMs != 0)
+            {
+                r.status = "Out of range"; r.dot = kDanger; r.statusColor = kDanger;
+            }
+            else
+            {
+                r.status = "Paired (idle)"; r.dot = kIdle; r.statusColor = kTextDim;
+            }
+            if (sl.inRange) snprintf(r.value, sizeof(r.value), "%d dBm", sl.rssi);
+            return;
+        }
+
+        // Assigned to something this host no longer owns — released, or paired by a
+        // different build. The assignment is still real and still stored; it just has
+        // nothing behind it, and a row that said "(unassigned)" here would be lying.
+        snprintf(r.name, sizeof(r.name), "%02X%02X%02X%02X%02X%02X",
+                 addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+        r.status = "Not paired any more";
+        r.dot = kWarn;
+        r.statusColor = kWarn;
+    }
+
+    /// A port row: the COM name in its own column, then the slave as an ordinary
+    /// adapter row. The divider is what says those are two different things — the
+    /// port belongs to the host computer, the slave to the radio.
+    lv_obj_t *MakePortRow(lv_obj_t *panel, const PortRow &r)
+    {
+        lv_obj_t *c = MakeCard(panel, kRowH);
+
+        lv_obj_t *com = MakeLabel(c, r.com, kText, &lv_font_montserrat_16);
+        lv_obj_align(com, LV_ALIGN_TOP_LEFT, 14, 12);
+
+        lv_obj_t *prt = MakeLabel(c, r.port, kTextFaint, &lv_font_montserrat_14);
+        lv_obj_align(prt, LV_ALIGN_TOP_LEFT, 14, 34);
+
+        lv_obj_t *rule = lv_obj_create(c);
+        lv_obj_add_style(rule, &g_stPlain, LV_PART_MAIN);
+        lv_obj_remove_flag(rule, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(rule, 1, 32);
+        lv_obj_set_style_bg_opa(rule, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(rule, lv_color_hex(kLine), LV_PART_MAIN);
+        lv_obj_align(rule, LV_ALIGN_LEFT_MID, 72, 0);
+
+        lv_obj_t *d = MakeDot(c, r.dot);
+        lv_obj_align(d, LV_ALIGN_LEFT_MID, 82, 0);
+
+        // Both of these get an explicit HEIGHT as well as a width. LV_LABEL_LONG_DOT
+        // only truncates within the box it is given, and a label left to size itself
+        // vertically simply grows a second line instead — which lands on top of the
+        // line below it. One line's worth of height is what makes the dots happen.
+        lv_obj_t *name = MakeLabel(c, r.name, kText, &lv_font_montserrat_16);
+        lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+        lv_obj_set_size(name, 112, 20);
+        lv_obj_align(name, LV_ALIGN_TOP_LEFT, 100, 11);
+
+        lv_obj_t *st = MakeLabel(c, r.status, r.statusColor, &lv_font_montserrat_14);
+        lv_label_set_long_mode(st, LV_LABEL_LONG_DOT);
+        lv_obj_set_size(st, 118, 18);
+        lv_obj_align(st, LV_ALIGN_TOP_LEFT, 100, 35);
+
+        if (r.value[0])
+        {
+            lv_obj_t *v = MakeLabel(c, r.value, kTextDim, &lv_font_montserrat_14);
+            lv_obj_align(v, LV_ALIGN_TOP_RIGHT, -34, 14);
+        }
+
+        lv_obj_t *ch = MakeLabel(c, LV_SYMBOL_RIGHT, kTextFaint, &lv_font_montserrat_14);
+        lv_obj_align(ch, LV_ALIGN_RIGHT_MID, -16, 0);
+        return c;
+    }
+
+    void OnUsbPortClicked(lv_event_t *e);   // opens the picker, defined below
+
+    void PopulateUsbList()
+    {
+        if (!g_usbList) return;
+        lv_obj_clean(g_usbList);
+
+        for (int i = 0; i < g_usbRowCount; ++i)
+        {
+            lv_obj_t *row = MakePortRow(g_usbList, g_usbRows[i]);
+            lv_obj_set_user_data(row, (void *)(intptr_t)(i + 1));   // the port number
+            lv_obj_add_event_cb(row, OnUsbPortClicked, LV_EVENT_CLICKED, nullptr);
+        }
+    }
+
+    /// Re-read the model and redraw only if a row actually changed. Same discipline as
+    /// the home list: this runs on a timer and a list rebuilt under a finger eats the
+    /// tap that was landing on it.
+    void RefreshUsb(lv_timer_t *)
+    {
+        if (!g_usbList) return;
+        if (lv_screen_active() != g_usbScreen) return;
+
+        constexpr int count = UsbPortManager::kMaxPorts;
+
+        PortRow rows[count] = {};
+        for (int p = 1; p <= count; ++p) FillPortRow(rows[p - 1], p);
+
+        if (count == g_usbRowCount &&
+            memcmp(rows, g_usbRows, sizeof(PortRow) * count) == 0)
+            return;
+
+        memcpy(g_usbRows, rows, sizeof(PortRow) * count);
+        g_usbRowCount = count;
+        PopulateUsbList();
+    }
+
+    void BuildUsbScreen()
+    {
+        g_usbScreen = MakeScreen();
+        MakeStatusBar(g_usbScreen, false);
+        MakeTitleBar(g_usbScreen,
+                     UsbPortManager::kMaxPorts == 1 ? "USB serial port" : "USB serial ports",
+                     &g_settingsScreen);
+
+        lv_obj_t *panel = MakePanel(g_usbScreen, kHeadH + 8,
+                                    ScreenH() - (kHeadH + 8) - kPad);
+
+        lv_obj_t *head = MakeLabel(panel,
+                                   UsbPortManager::kMaxPorts == 1 ? "PORT ASSIGNMENT"
+                                                                  : "PORT ASSIGNMENTS",
+                                   kTextFaint, &lv_font_montserrat_14);
+        lv_obj_set_style_pad_left(head, 4, LV_PART_MAIN);
+
+        // A panel inside the panel: the rows are rebuilt as a group whenever the model
+        // changes, and clearing a container is how that is done without disturbing the
+        // heading above it.
+        g_usbList = lv_obj_create(panel);
+        lv_obj_add_style(g_usbList, &g_stPlain, LV_PART_MAIN);
+        lv_obj_set_width(g_usbList, LV_PCT(100));
+        lv_obj_set_height(g_usbList, LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(g_usbList, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_style_pad_row(g_usbList, kGap, LV_PART_MAIN);
+        lv_obj_remove_flag(g_usbList, LV_OBJ_FLAG_SCROLLABLE);
+
+        RefreshUsb(nullptr);
+    }
+
+    // ── The picker ──────────────────────────────────────────────
+    // Opened from a port row, and it answers one question: what goes on THIS port. It
+    // lists what this host owns, because a port can only ever carry a slave the device
+    // is actually bonded to — pairing something new is the home screen's job, not this
+    // one's, and folding the two together is how a screen stops meaning one thing.
+
+    void OnUsbPickClicked(lv_event_t *e)
+    {
+        const int choice = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target_obj(e));
+        auto &usb = g_app->getUsbPorts();
+
+        if (choice < 0)
+        {
+            usb.Unassign(g_usbPickPort);
+        }
+        else
+        {
+            BleHostManager::PairedSlave paired[BleHostManager::kMaxPaired];
+            const int np = g_app->getBleHost().GetPaired(paired, BleHostManager::kMaxPaired);
+            if (choice < np) usb.Assign(g_usbPickPort, paired[choice].addr);
+        }
+
+        RefreshUsb(nullptr);
+        lv_screen_load(g_usbScreen);
+    }
+
+    void PopulateUsbPickList()
+    {
+        if (!g_usbPickList) return;
+        lv_obj_clean(g_usbPickList);
+
+        auto &usb = g_app->getUsbPorts();
+        uint8_t current[6] = {};
+        const bool assigned = usb.Assignment(g_usbPickPort, current);
+
+        // "Nothing" first: clearing a port is the one choice always available, and
+        // burying it under the list would make it feel like a special operation.
+        {
+            RowSpec spec{};
+            spec.dot       = kIdle;
+            spec.name      = "(unassigned)";
+            spec.sub       = "Leave this port empty";
+            spec.subColor  = kTextFaint;
+            spec.selected  = !assigned;
+            lv_obj_t *row = MakeRow(g_usbPickList, spec);
+            lv_obj_set_user_data(row, (void *)(intptr_t)-1);
+            lv_obj_add_event_cb(row, OnUsbPickClicked, LV_EVENT_CLICKED, nullptr);
+        }
+
+        BleHostManager::PairedSlave paired[BleHostManager::kMaxPaired];
+        const int np = g_app->getBleHost().GetPaired(paired, BleHostManager::kMaxPaired);
+        if (np == 0)
+        {
+            MakeEmptyCard(g_usbPickList, "No paired slaves yet");
+            return;
+        }
+
+        for (int i = 0; i < np; ++i)
+        {
+            const BleHostManager::PairedSlave &sl = paired[i];
+
+            char value[16] = {};
+            if (sl.inRange) snprintf(value, sizeof(value), "%d dBm", sl.rssi);
+
+            // Where it is now, if anywhere. Saying so up front is what makes the move
+            // predictable: picking it here takes it off whatever port it is on.
+            char sub[40] = {};
+            const int on = usb.PortOf(sl.addr);
+            if (on != 0 && on != g_usbPickPort)
+                snprintf(sub, sizeof(sub), "On COM%d", on);
+            else
+                snprintf(sub, sizeof(sub), "%s", sl.inRange ? "In range" : "Not seen");
+
+            RowSpec spec{};
+            spec.dot       = sl.inRange ? kOk : kIdle;
+            spec.name      = sl.name[0] ? sl.name : "Unnamed slave";
+            spec.sub       = sub;
+            spec.subColor  = (on != 0 && on != g_usbPickPort) ? kWarn
+                                                              : (sl.inRange ? kOk : kTextDim);
+            spec.value     = value[0] ? value : nullptr;
+            spec.selected  = assigned && memcmp(sl.addr, current, 6) == 0;
+
+            lv_obj_t *row = MakeRow(g_usbPickList, spec);
+            lv_obj_set_user_data(row, (void *)(intptr_t)i);
+            lv_obj_add_event_cb(row, OnUsbPickClicked, LV_EVENT_CLICKED, nullptr);
+        }
+    }
+
+    void BuildUsbPickScreen()
+    {
+        g_usbPickScreen = MakeScreen();
+        MakeStatusBar(g_usbPickScreen, false);
+        MakeTitleBar(g_usbPickScreen, "Assign port", &g_usbScreen, &g_usbPickTitle);
+
+        g_usbPickList = MakePanel(g_usbPickScreen, kHeadH + 8,
+                                  ScreenH() - (kHeadH + 8) - kPad);
+        PopulateUsbPickList();
+    }
+
+    void OnUsbPortClicked(lv_event_t *e)
+    {
+        g_usbPickPort = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target_obj(e));
+        if (g_usbPickPort < 1) return;
+
+        lv_label_set_text_fmt(g_usbPickTitle, "Assign COM%d", g_usbPickPort);
+        PopulateUsbPickList();
+        lv_screen_load(g_usbPickScreen);
+    }
+
+    void OnUsbEntryClicked(lv_event_t *)
+    {
+        RefreshUsb(nullptr);
+        lv_screen_load(g_usbScreen);
+    }
+
     void BuildSettingsScreen()
     {
         g_settingsScreen = MakeScreen();
@@ -1245,19 +1604,129 @@ namespace
         lv_obj_t *slaves = MakeMenuRow(panel, LV_SYMBOL_BLUETOOTH,
                                        "Pair new slave", "Discover and pair devices");
         lv_obj_add_event_cb(slaves, OnSlavesEntryClicked, LV_EVENT_CLICKED, nullptr);
+
+        lv_obj_t *usb = MakeMenuRow(panel, LV_SYMBOL_USB,
+                                    UsbPortManager::kMaxPorts == 1 ? "USB serial port"
+                                                                   : "USB serial ports",
+                                    UsbPortManager::kMaxPorts == 1
+                                        ? "Choose the slave on COM1"
+                                        : "Assign slaves to COM ports");
+        lv_obj_add_event_cb(usb, OnUsbEntryClicked, LV_EVENT_CLICKED, nullptr);
     }
 
     // ──────────────────────────────────────────────────────────
     // Home — the product. The adapters this host owns, and what else is around.
     // ──────────────────────────────────────────────────────────
-    void OnHomeFoundPicked(lv_event_t *e)
+    /// "just now", "3 min ago", "2 h ago". Short because it shares the right-hand
+    /// column with an RSSI reading and a chevron.
+    void Ago(uint32_t sinceMs, char *out, size_t cap)
     {
-        auto *btn = static_cast<lv_obj_t *>(lv_event_get_target(e));
-        const int idx = (int)(intptr_t)lv_obj_get_user_data(btn);
-        if (idx < 0 || idx >= g_homeFoundCount) return;
-        // Tapping a found slave goes straight to the code pad — pairing is the
-        // only thing you can do with one you do not own yet.
-        AskForCode(g_homeFound[idx]);
+        const uint32_t sec = sinceMs / 1000;
+        if (sec < 60)          snprintf(out, cap, "just now");
+        else if (sec < 3600)   snprintf(out, cap, "%lu min ago", (unsigned long)(sec / 60));
+        else                   snprintf(out, cap, "%lu h ago", (unsigned long)(sec / 3600));
+    }
+
+    /// Fold the bond table and the scan results into one ordered list of rows.
+    ///
+    /// The ORDER is the product's own priority rather than the radio's: whatever this
+    /// host is actually talking to, then what it owns and can reach, then what it owns
+    /// and cannot, then strangers. Within a class, the strongest signal first — which
+    /// on a bench is a fair proxy for "the one in front of you".
+    int BuildSlaveRows(SlaveRow *out, int max)
+    {
+        auto &ble = g_app->getBleHost();
+
+        BleHostManager::PairedSlave paired[BleHostManager::kMaxPaired];
+        const int np = ble.GetPaired(paired, BleHostManager::kMaxPaired);
+
+        BleHostManager::Slave seen[BleHostManager::kMaxResults];
+        const int ns = ble.GetResults(seen, BleHostManager::kMaxResults);
+
+        const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+        int n = 0;
+
+        // Ours first, whatever state they are in. A paired slave is never dropped from
+        // the list for being switched off: a row that vanishes reads as "lost", and it
+        // only ever means "not answering right now".
+        for (int i = 0; i < np && n < max; ++i)
+        {
+            const BleHostManager::PairedSlave &s = paired[i];
+            SlaveRow r{};
+            snprintf(r.name, sizeof(r.name), "%s", s.name[0] ? s.name : "Unnamed slave");
+            r.rssi = s.inRange ? s.rssi : -128;
+
+            const BleHostManager::Link link = ble.LinkFor(s.addr);
+            if (link == BleHostManager::Link::Connected)
+            {
+                r.rank = 0; r.dot = kOk; r.status = "Connected"; r.statusColor = kOk;
+                if (s.inRange) snprintf(r.value, sizeof(r.value), "%d dBm", s.rssi);
+            }
+            else if (link == BleHostManager::Link::Connecting)
+            {
+                r.rank = 1; r.dot = kAccent; r.status = "Connecting..."; r.statusColor = kAccent;
+                if (s.inRange) snprintf(r.value, sizeof(r.value), "%d dBm", s.rssi);
+            }
+            else if (s.inRange)
+            {
+                r.rank = 2; r.dot = kOk; r.status = "In range"; r.statusColor = kOk;
+                snprintf(r.value, sizeof(r.value), "%d dBm", s.rssi);
+            }
+            else if (s.lastSeenMs != 0)
+            {
+                // Heard from earlier this boot and not now: it went away rather than
+                // never having been here, and the panel can say which.
+                r.rank = 3; r.dot = kDanger; r.status = "Out of range"; r.statusColor = kDanger;
+                Ago(now - s.lastSeenMs, r.value, sizeof(r.value));
+            }
+            else
+            {
+                r.rank = 4; r.dot = kIdle; r.status = "Paired (idle)"; r.statusColor = kTextDim;
+                snprintf(r.value, sizeof(r.value), "-");
+            }
+            out[n++] = r;
+        }
+
+        // Then everything else on the air. `bonded` ones are already above, under the
+        // name and state this host knows them by.
+        for (int i = 0; i < ns && n < max; ++i)
+        {
+            const BleHostManager::Slave &s = seen[i];
+            if (s.bonded) continue;
+
+            SlaveRow r{};
+            snprintf(r.name, sizeof(r.name), "%s", s.name[0] ? s.name : "Unnamed slave");
+            r.rssi = s.rssi;
+            snprintf(r.value, sizeof(r.value), "%d dBm", s.rssi);
+
+            if (s.advBonded)
+            {
+                // It says it has an owner, and it is not us.
+                r.rank = 6; r.dot = kWarn; r.status = "Claimed by another host";
+                r.statusColor = kWarn;
+            }
+            else
+            {
+                r.rank = 5; r.dot = kAccent; r.status = "Available to pair";
+                r.statusColor = kTextDim;
+            }
+            out[n++] = r;
+        }
+
+        // Insertion sort: n is at most two dozen and this runs on a 700 ms timer.
+        for (int i = 1; i < n; ++i)
+        {
+            SlaveRow key = out[i];
+            int j = i - 1;
+            while (j >= 0 && (out[j].rank > key.rank ||
+                              (out[j].rank == key.rank && out[j].rssi < key.rssi)))
+            {
+                out[j + 1] = out[j];
+                --j;
+            }
+            out[j + 1] = key;
+        }
+        return n;
     }
 
     void PopulateHomeList()
@@ -1265,64 +1734,31 @@ namespace
         if (!g_homeList) return;
         lv_obj_clean(g_homeList);
 
-        // ── Paired, first. These are the product: the adapters this host owns
-        // and will eventually expose as COM ports. They stay listed whether or
-        // not they are switched on, because a missing row would read as "lost"
-        // when it only means "out of range".
-        MakeSection(g_homeList, "PAIRED");
-        if (g_homePairedCount == 0)
+        if (g_homeRowCount == 0)
         {
-            MakeEmptyCard(g_homeList, "None yet - pair one below");
-        }
-        else
-        {
-            for (int i = 0; i < g_homePairedCount; ++i)
-            {
-                const BleHostManager::PairedSlave &s = g_homePaired[i];
-
-                char value[16] = {};
-                if (s.inRange) snprintf(value, sizeof(value), "%d dBm", s.rssi);
-
-                RowSpec spec{};
-                spec.dot      = s.inRange ? kOk : kIdle;
-                spec.name     = s.name[0] ? s.name : "Unnamed slave";
-                spec.sub      = s.inRange ? "In range" : "Not seen";
-                spec.subColor = s.inRange ? kOk : kTextDim;
-                spec.value    = s.inRange ? value : "-";
-                spec.chevron  = false;
-
-                lv_obj_t *row = MakeRow(g_homeList, spec);
-                // No handler yet. The switch that turns a slave into a COM port
-                // belongs here, and goes in when there is a port to turn on.
-                lv_obj_remove_flag(row, LV_OBJ_FLAG_CLICKABLE);
-            }
-        }
-
-        // ── Then whatever else is on the air and not ours.
-        MakeSection(g_homeList, "FOUND");
-        if (g_homeFoundCount == 0)
-        {
-            MakeEmptyCard(g_homeList, "Nothing new nearby");
+            MakeEmptyCard(g_homeList, "Nothing paired, nothing nearby");
             return;
         }
-        for (int i = 0; i < g_homeFoundCount; ++i)
-        {
-            const BleHostManager::Slave &s = g_homeFound[i];
 
-            char value[16];
-            snprintf(value, sizeof(value), "%d dBm", s.rssi);
+        for (int i = 0; i < g_homeRowCount; ++i)
+        {
+            const SlaveRow &r = g_homeRows[i];
 
             RowSpec spec{};
-            spec.dot      = s.advBonded ? kWarn : kAccent;
-            spec.name     = s.name[0] ? s.name : "Unnamed slave";
-            spec.sub      = s.advBonded ? "Owned by another host" : "Available to pair";
-            spec.subColor = s.advBonded ? kWarn : kTextDim;
-            spec.value    = value;
-            spec.chevron  = true;
+            spec.dot       = r.dot;
+            spec.name      = r.name;
+            spec.sub       = r.status;
+            spec.subColor  = r.statusColor;
+            spec.value     = r.value[0] ? r.value : nullptr;
+            spec.chevron   = true;
 
             lv_obj_t *row = MakeRow(g_homeList, spec);
-            lv_obj_set_user_data(row, (void *)(intptr_t)i);
-            lv_obj_add_event_cb(row, OnHomeFoundPicked, LV_EVENT_CLICKED, nullptr);
+
+            // The chevron is drawn because a row IS the way into a slave's details,
+            // pair and connect actions — but that screen does not exist yet, so the
+            // row does not take a press. A card that lights up under a finger and then
+            // does nothing is a worse promise than one that stays still.
+            lv_obj_remove_flag(row, LV_OBJ_FLAG_CLICKABLE);
         }
     }
 
@@ -1346,11 +1782,13 @@ namespace
         lv_obj_set_style_text_align(tag, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
         lv_obj_set_pos(tag, 0, kStatusH + 44);
 
+        // The list runs to the bottom of the screen: there is no action anchored down
+        // there any more. Pairing starts from a row now (or from Settings while that
+        // flow is being built), not from a button that could only ever mean "go to the
+        // other list".
         const int listY = kStatusH + 74;
-        g_homeList = MakePanel(g_homeScreen, listY, ListBot() - listY);
+        g_homeList = MakePanel(g_homeScreen, listY, ScreenH() - kPad - listY);
         PopulateHomeList();
-
-        MakeCta(g_homeScreen, LV_SYMBOL_PLUS "   Pair new slave", OnSlavesEntryClicked);
     }
 
     /// Keeps the home list current, and keeps a scan running while the home
@@ -1370,40 +1808,19 @@ namespace
         if (ble.GetState() == BleHostManager::State::Idle)
             ble.StartScan(4000);
 
-        BleHostManager::PairedSlave paired[BleHostManager::kMaxPaired];
-        const int np = ble.GetPaired(paired, BleHostManager::kMaxPaired);
+        SlaveRow rows[kMaxHomeRows];
+        const int n = BuildSlaveRows(rows, kMaxHomeRows);
 
-        BleHostManager::Slave seen[BleHostManager::kMaxResults];
-        const int ns = ble.GetResults(seen, BleHostManager::kMaxResults);
+        // Rebuild only on a real change. An LVGL list rebuilt under a finger eats the
+        // tap, and this runs several times a second.
+        if (n == g_homeRowCount && memcmp(rows, g_homeRows, sizeof(SlaveRow) * n) == 0)
+            return;
 
-        // Anything already paired is shown in the top section, so drop it here
-        // rather than listing the same adapter twice under two headings.
-        BleHostManager::Slave found[BleHostManager::kMaxResults];
-        int nf = 0;
-        for (int i = 0; i < ns; ++i)
-        {
-            if (seen[i].bonded) continue;
-            found[nf++] = seen[i];
-        }
-
-        bool changed = (np != g_homePairedCount) || (nf != g_homeFoundCount);
-        if (!changed)
-            for (int i = 0; i < np && !changed; ++i)
-                changed = memcmp(&paired[i], &g_homePaired[i],
-                                 sizeof(BleHostManager::PairedSlave)) != 0;
-        if (!changed)
-            for (int i = 0; i < nf && !changed; ++i)
-                changed = memcmp(&found[i], &g_homeFound[i],
-                                 sizeof(BleHostManager::Slave)) != 0;
-
-        if (!changed) return;
-
-        memcpy(g_homePaired, paired, sizeof(BleHostManager::PairedSlave) * np);
-        g_homePairedCount = np;
-        memcpy(g_homeFound, found, sizeof(BleHostManager::Slave) * nf);
-        g_homeFoundCount = nf;
+        memcpy(g_homeRows, rows, sizeof(SlaveRow) * n);
+        g_homeRowCount = n;
         PopulateHomeList();
     }
+
 }   // namespace
 
 // ──────────────────────────────────────────────────────────────
@@ -1745,6 +2162,8 @@ void UiManager::Init()
         BuildSlavesScreen();
         BuildCodeScreen();
         BuildPairingScreen();
+        BuildUsbScreen();
+        BuildUsbPickScreen();
         lv_screen_load(g_homeScreen);
 
         RefreshStatus(nullptr);
@@ -1756,6 +2175,9 @@ void UiManager::Init()
         lv_timer_create(RefreshSlaves, 500, nullptr);
         lv_timer_create(RefreshPairing, 400, nullptr);
         lv_timer_create(RefreshHome, 700, nullptr);
+        // The ports screen shows live BLE state for whatever is assigned, so it needs
+        // the same kind of poll the lists it borrows that state from use.
+        lv_timer_create(RefreshUsb, 700, nullptr);
         lvgl_port_unlock();
     }
 
