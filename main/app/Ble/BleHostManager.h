@@ -39,6 +39,13 @@ class BleHostManager
 
 public:
     static constexpr int kMaxResults = 16;
+
+    /// How long a slave stays on the list after its last advertisement. Three
+    /// scan cycles: the home screen runs 4 s windows with up to a poll's gap
+    /// between them, so anything shorter can expire a slave that is merely
+    /// between adverts, and the list blinks again. A slave that has actually
+    /// left is gone within this plus a cycle, which nobody is waiting on.
+    static constexpr uint32_t kResultHoldMs = 12000;
     static constexpr int kMaxPaired = CONFIG_BT_NIMBLE_MAX_BONDS;
 
     /// One slave as seen on the air. `bonded` is what THIS host knows; `advBonded`
@@ -53,6 +60,10 @@ public:
         bool    advBonded;     // the slave says it has an owner
         bool    advConnected;  // the slave says a host is on its link
         bool    bonded;        // WE have a bond with it
+
+        /// Milliseconds since boot when this slave was last heard from. What makes
+        /// the list survive a scan boundary: entries are AGED, never cleared.
+        uint32_t lastSeenMs;
     };
 
     /// One slave this host owns. Survives reboots; `inRange` and `rssi` do not,
@@ -85,9 +96,15 @@ public:
 
     void Init();
 
-    /// Begin (or restart) a discovery window. Results accumulate until the next
-    /// StartScan; a slave that misses a packet is not dropped mid-window,
-    /// because a list that flickers is unusable to tap at.
+    /// Begin (or restart) a discovery window. Results are AGED, not cleared: an
+    /// entry survives until it has gone kResultHoldMs without being heard, so a
+    /// slave that misses a packet is not dropped mid-window and a slave that is
+    /// simply quiet is not dropped at the boundary between windows either.
+    ///
+    /// The distinction used to be invisible, because a window was something the
+    /// user asked for. The home screen now restarts one every time the radio
+    /// falls idle, so windows run back to back and clearing at the top of each
+    /// one is exactly the flicker this list was built to avoid.
     void StartScan(uint32_t durationMs = 6000);
     void StopScan();
 
@@ -119,6 +136,14 @@ private:
     mutable Mutex lock_;
     Slave results_[kMaxResults] = {};
     int resultCount_ = 0;
+
+    /// Drop results older than kResultHoldMs, compacting in place. Caller holds
+    /// no lock; this takes it.
+    void ExpireResults();
+
+    /// What the last INFO line said, so a scan that finds the same room as the one
+    /// before it says nothing. -1 because 0 is a real answer worth logging once.
+    int lastLoggedResults_ = -1;
 
     PairedSlave roster_[kMaxPaired] = {};
     int rosterCount_ = 0;

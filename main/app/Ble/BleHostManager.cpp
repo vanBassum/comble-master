@@ -6,6 +6,7 @@
 
 #include "esp_log.h"
 #include "esp_bt.h"
+#include "esp_timer.h"
 
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
@@ -127,12 +128,38 @@ void BleHostManager::OnSync()
 
 // ──────────────────────────────────────────────────────────────
 
+namespace
+{
+    /// Milliseconds since boot. Wraps after 49 days; the only arithmetic done on it
+    /// is a difference between two recent stamps, which wraps correctly.
+    inline uint32_t NowMs()
+    {
+        return static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    }
+}
+
+void BleHostManager::ExpireResults()
+{
+    const uint32_t now = NowMs();
+
+    LOCK(lock_);
+    int kept = 0;
+    for (int i = 0; i < resultCount_; ++i)
+    {
+        if (now - results_[i].lastSeenMs >= kResultHoldMs) continue;
+        if (kept != i) results_[kept] = results_[i];
+        ++kept;
+    }
+    resultCount_ = kept;
+}
+
 void BleHostManager::StartScan(uint32_t durationMs)
 {
-    {
-        LOCK(lock_);
-        resultCount_ = 0;
-    }
+    // Aged, NOT cleared. Clearing here is what made a row vanish and come back
+    // every few seconds: the list emptied at the top of every window and refilled
+    // only when each slave next advertised, which is its own business and can be
+    // a second or more away.
+    ExpireResults();
     state_ = State::Scanning;
 
     struct ble_gap_disc_params params = {};
@@ -154,7 +181,11 @@ void BleHostManager::StartScan(uint32_t durationMs)
         state_ = State::Failed;
         return;
     }
-    ESP_LOGI(TAG, "Scanning for %lums", (unsigned long)durationMs);
+    // DEBUG, not INFO: a scan starts every few seconds for as long as the device is
+    // powered, so at INFO this line and its DISC_COMPLETE partner ARE the console —
+    // they push everything that means something off the top. What a scan actually
+    // changes is how many slaves are on the air, and that is logged where it changes.
+    ESP_LOGD(TAG, "Scanning for %lums", (unsigned long)durationMs);
 }
 
 void BleHostManager::StopScan()
@@ -450,8 +481,8 @@ void BleHostManager::AddOrUpdate(const struct ble_gap_disc_desc *disc)
 
     if (idx < 0)
     {
-        if (!ours) return;                       // not a Comble slave, and not one we know
-        if (resultCount_ >= kMaxResults) return; // list full; a rescan clears it
+        if (!ours) return;                        // not a Comble slave, and not one we know
+        if (resultCount_ >= kMaxResults) return;  // full; it drains as entries age out
         idx = resultCount_++;
         results_[idx] = {};
         memcpy(results_[idx].addr, disc->addr.val, 6);
@@ -461,6 +492,7 @@ void BleHostManager::AddOrUpdate(const struct ble_gap_disc_desc *disc)
 
     Slave &s = results_[idx];
     s.rssi = disc->rssi;
+    s.lastSeenMs = NowMs();   // the stamp ExpireResults ages against
 
     if (fields.name != nullptr && fields.name_len > 0)
     {
@@ -549,7 +581,17 @@ int BleHostManager::OnGapEvent(struct ble_gap_event *event)
 
     case BLE_GAP_EVENT_DISC_COMPLETE:
         if (state_ == State::Scanning) state_ = State::Idle;
-        ESP_LOGI(TAG, "Scan complete: %d slave(s)", resultCount_);
+        ESP_LOGD(TAG, "Scan complete: %d slave(s)", resultCount_);
+
+        // The transition, not the poll. resultCount_ is cleared at the top of every
+        // scan (see StartScan), so an empty room stays silent after the first line and
+        // a slave appearing or leaving still says so exactly once.
+        if (resultCount_ != lastLoggedResults_)
+        {
+            ESP_LOGI(TAG, "Slaves on the air: %d", resultCount_);
+            lastLoggedResults_ = resultCount_;
+        }
+
         ReconcileRoster();
         return 0;
 
