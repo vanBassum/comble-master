@@ -81,3 +81,17 @@ CONFIG_LV_FONT_MONTSERRAT_28=y
 # nothing until a capture is asked for — the frame buffer is the caller's (UiManager
 # takes it from PSRAM, not from LVGL's 64 KB lv_malloc pool).
 CONFIG_LV_USE_SNAPSHOT=y
+# ── TLS ──────────────────────────────────────────────
+# mbedTLS allocates from PSRAM, for the same reason NimBLE does (root defaults) and
+# with the same symptom if it does not: the relay could not open a socket at all,
+#   esp-tls-mbedtls: mbedtls_ssl_setup returned -0x7F00
+# which is MBEDTLS_ERR_SSL_ALLOC_FAILED — a 16 KB inbound record buffer plus an
+# outbound one, wanted from an internal heap that WiFi, httpd and two LVGL draw
+# buffers had already spent. The failure is silent about its cause and reads like a
+# certificate problem, which is what makes it worth a line here.
+#
+# Safe because mbedTLS does no DMA; the draw buffers, which do, stay internal. This
+# lives in the BOARD file rather than the root one because the option depends on
+# SPIRAM_USE_MALLOC — on a board with no PSRAM it could not take effect, and the
+# drift guard would (correctly) stop the build over an assertion that did not hold.
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
