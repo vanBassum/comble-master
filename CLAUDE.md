@@ -11,13 +11,14 @@ Strux is a template/foundation for ESP32 firmware (ESP-IDF v6.0, C++, FreeRTOS) 
 Firmware (requires ESP-IDF v6.0+ environment):
 
 ```bash
-idf.py set-target esp32
+idf.py set-target esp32s3
 idf.py build                          # also builds the frontend if pnpm is installed
 idf.py -p <PORT> flash monitor
-idf.py -DBOARD=<name> build           # select a board from main/hardware/boards/ (default: esp32_devkit)
 ```
 
-Boards today: `esp32_devkit` (ESP32-WROOM-32) and `esp32c3_supermini` (ESP32-C3, USB-C, LED on GPIO8 active low). A non-default chip needs *both* halves — `idf.py -DBOARD=esp32c3_supermini set-target esp32c3`, then build — because `set-target` picks the chip and `-DBOARD` picks the pinout, and a board's `sdkconfig.defaults` cannot supply the chip (see the note below). Add `-B build_c3 -D SDKCONFIG=sdkconfig.c3` to keep a second board's tree beside the default one instead of overwriting it.
+**One board: `wt_sc01_plus`** — Wireless-Tag WT-SC01 Plus, ESP32-S3-WROOM-1-N16R2, 3.5" 320x480 ST7796 panel over an 8-bit i80 bus with FT6336U touch, 16 MB flash, 2 MB quad PSRAM, USB-C on the chip's native USB. It is the default, so `-DBOARD=` is never needed; the chip is still selected separately with `idf.py set-target esp32s3`, because `set-target` picks the chip and `-DBOARD` picks the pinout and a board's `sdkconfig.defaults` cannot supply the chip (see the note below).
+
+The template's generic `esp32_devkit` and `esp32c3_supermini` folders were removed on 2026-09-16 — this repository is the Comble host, not Strux, and both had stopped configuring anyway: the root defaults assert `CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL`, which a chip with no PSRAM cannot satisfy and the drift guard correctly refuses. The board *mechanism* stays, so a second board is a folder rather than a refactor; git has the two that left.
 
 **A new line in `sdkconfig.defaults` does not reach an existing build — but the build now refuses instead of lying.** Generated `sdkconfig` files are loaded *after* the defaults and win every conflict, and an option left at its default is still recorded there — as `# CONFIG_FOO is not set` — so adding `CONFIG_FOO=y` to the defaults changes nothing in a tree that already has one. That used to fail silently, exactly like the `CONFIG_IDF_TARGET` case below. A guard in the root [CMakeLists.txt](CMakeLists.txt) now checks every assertion in the composed defaults against what was generated and stops the build naming the options that did not take, with the fix in the message: delete the generated file (`sdkconfig` and `sdkconfig.*` are gitignored and reproducible) and re-run `set-target`. So pulling a commit that changes the defaults gives you a build error, not a wrong binary. A deliberate local override of something the defaults assert needs `-DSTRUX_ALLOW_SDKCONFIG_DRIFT=ON`.
 

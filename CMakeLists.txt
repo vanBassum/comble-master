@@ -25,7 +25,7 @@ endif()
 # the composition point: the board file overlays the common one and wins on
 # conflicts. BOARD is the same cache var consumed by main/CMakeLists.txt.
 if(NOT DEFINED BOARD)
-    set(BOARD "esp32_devkit")
+    set(BOARD "wt_sc01_plus")
 endif()
 set(SDKCONFIG_DEFAULTS "sdkconfig.defaults")
 if(EXISTS "${CMAKE_SOURCE_DIR}/main/hardware/boards/${BOARD}/sdkconfig.defaults")

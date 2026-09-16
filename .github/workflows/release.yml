@@ -14,20 +14,23 @@ env:
   PROJECT_NAME: "CombleMaster"
 
 jobs:
-  # One leg per board in main/hardware/boards/. set-target picks the chip and
-  # -DBOARD picks the pinout: a board cannot supply its own chip (see the note
-  # in main/CMakeLists.txt), so both halves are spelled out here.
+  # One leg per board in main/hardware/boards/, of which there is one: this
+  # repository is the Comble host and the WT-SC01 Plus is the hardware it runs
+  # on. The template's DevKit and C3 SuperMini legs were removed with their
+  # board folders on 2026-09-16.
+  #
+  # The matrix stays a matrix because the artifact names are built from
+  # matrix.board, and because a second board is a row rather than a rewrite.
+  # set-target picks the chip and -DBOARD picks the pinout: a board cannot
+  # supply its own chip (see the note in main/CMakeLists.txt), so both halves
+  # are spelled out here.
   build:
     runs-on: ubuntu-latest
 
     strategy:
-      fail-fast: false          # a broken board should not hide the other one
+      fail-fast: false
       matrix:
         include:
-          - board: esp32_devkit
-            target: esp32
-          - board: esp32c3_supermini
-            target: esp32c3
           - board: wt_sc01_plus
             target: esp32s3
 
@@ -99,7 +102,10 @@ jobs:
           base="${{ env.PROJECT_NAME }}-${{ matrix.board }}"
           cp build/merged-factory.bin "dist/$base-factory.bin"
           cp "build/${{ env.PROJECT_NAME }}.bin" "dist/$base-app.bin"
-          cp build/www.bin "dist/$base-www.bin"
+          # No www.bin: the frontend is packed into a blob and embedded in the
+          # app image (components/web_assets), so there is no FAT partition to
+          # ship on its own any more. This line copied a file no board has
+          # produced since that change.
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
@@ -127,9 +133,8 @@ jobs:
           body: |
             ### Firmware files
 
-            One set per board: `esp32_devkit` (ESP32-WROOM-32) and `esp32c3_supermini` (ESP32-C3).
+            For `wt_sc01_plus` (ESP32-S3, the Comble host).
 
             - **`${{ env.PROJECT_NAME }}-<board>-factory.bin`** — full image (bootloader + partition table + app + web UI). For a first flash or a recovery, from offset zero: `esptool write-flash 0x0 <file>`.
-            - **`${{ env.PROJECT_NAME }}-<board>-app.bin`** — application only. Upload it to the inactive `ota_0`/`ota_1` partition from the device's Firmware page.
-            - **`${{ env.PROJECT_NAME }}-<board>-www.bin`** — the web UI as a FAT image. Upload it to the `www` partition from the same page to update the frontend on its own.
+            - **`${{ env.PROJECT_NAME }}-<board>-app.bin`** — application only, web UI included. Upload it to the inactive `ota_0`/`ota_1` partition from the device's Firmware page.
           files: dist/*.bin

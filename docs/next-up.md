@@ -19,11 +19,6 @@ the connector from USB Serial/JTAG.
 → [`backlog/2026-09-16-usb-com-port.md`](backlog/2026-09-16-usb-com-port.md) ·
 [`reasoning/…two-in-endpoints…`](reasoning/2026-09-16-16h26-3-a-com-port-costs-two-in-endpoints-so-how-many-there-are-is-silicon-not-a-setting.md)
 
-**Outstanding: the DevKit and C3 SuperMini boards cannot be configured in this fork.** The
-root defaults assert `CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y` — added for the S3's
-PSRAM — and the drift guard correctly refuses a chip with no PSRAM to allocate from. Both
-boards carry a `USB_COM_PORTS = 0` that has therefore never been compiled.
-
 **The frontend is one SPA again, and the module mechanism is gone.** `UiManager`,
 `UiModule`, the four `UiModule` declarations, `frontend/modules/`, `shell-contract/` and
 `src/shell/` were all deleted; the pages are back in `frontend/src/pages/` with the LED

@@ -107,11 +107,17 @@ set(COMPONENT_REQUIRES
 )
 
 # ── Board selection ────────────────────────────────────────────
-# Pick the target board with -DBOARD=<name>; defaults to the generic ESP32
-# DevKit. Each board lives in main/hardware/boards/<name>/ with its own
-# BoardConfig.h and a board.cmake fragment that may append extra files to
-# BOARD_SOURCES. Shared, board-independent drivers live in hardware/drivers/.
-set(BOARD "esp32_devkit" CACHE STRING "Target board (folder under main/hardware/boards/)")
+# Pick the target board with -DBOARD=<name>. There is exactly one today — the
+# WT-SC01 Plus this product is built on — and the mechanism stays because the
+# board layer is what it is for: a board lives in main/hardware/boards/<name>/
+# with its own BoardConfig.h and a board.cmake fragment that may append extra
+# files to BOARD_SOURCES, and shared, board-independent drivers live in
+# hardware/drivers/. The Strux template's generic DevKit and C3 SuperMini
+# folders were removed on 2026-09-16: this repository is the Comble host, not
+# the template, and both had stopped configuring anyway — the root defaults now
+# assert CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL, which a chip with no PSRAM
+# cannot satisfy. Git has them if a headless Comble variant ever wants one back.
+set(BOARD "wt_sc01_plus" CACHE STRING "Target board (folder under main/hardware/boards/)")
 
 set(BOARD_DIR "${CMAKE_CURRENT_LIST_DIR}/hardware/boards/${BOARD}")
 if(NOT EXISTS "${BOARD_DIR}/board.cmake")
